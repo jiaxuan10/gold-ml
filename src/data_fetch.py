@@ -1,126 +1,193 @@
 # ======================================
-# GOLD PRICE DATA COLLECTION (XAU/USD)
-# Short-Mid Term Prediction (1~15 days)
+# fetch_data.py
+# GOLD PRICE + MACRO + INDEX DATA PIPELINE (Optimized + Enhanced)
 # ======================================
 
 import os
 import pandas as pd
+import numpy as np
 import yfinance as yf
 from pandas_datareader import data as pdr
-from alpha_vantage.timeseries import TimeSeries
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ---------- PATH CONFIG ----------
 os.makedirs("data/raw", exist_ok=True)
 os.makedirs("data/final", exist_ok=True)
 
+LOCAL_CSV = "data/XAU_USD_DATASET.csv"
 FINAL_CSV = "data/final/final_dataset_daily.csv"
 FINAL_PARQUET = "data/final/final_dataset_daily.parquet"
 
-# ---------- DATA RANGE ----------
+# ---------- DATE RANGE ----------
+START_DATE = datetime(2004, 1, 1)
 END_DATE = datetime.today()
-START_DATE = END_DATE - timedelta(days=5*365)  # 最近5年
 
-# ---------- HELPER: Incremental Update ----------
-def incremental_update(df_old, df_new, date_col="Date"):
-    df_new = df_new.reset_index(drop=True)
-    df_old = df_old.reset_index(drop=True)
-    df_merged = pd.concat([df_old, df_new]).drop_duplicates(subset=[date_col])
-    df_merged = df_merged.sort_values(by=date_col).reset_index(drop=True)
-    return df_merged
+# ======================================
+# 1. Load Local Gold Data
+# ======================================
+print("📂 Loading local gold dataset...")
 
-# ---------- 1. XAU/USD Daily OHLCV ----------
-print("Fetching XAU/USD from Alpha Vantage...")
-ts = TimeSeries(key="Y0QJSPYANK6SFHKC", output_format="pandas")
-xau_df, _ = ts.get_daily(symbol="XAUUSD", outputsize="full")
-xau_df = xau_df.reset_index()
-xau_df.rename(columns={
-    "date": "Date",
-    "1. open": "Open",
-    "2. high": "High",
-    "3. low": "Low",
-    "4. close": "Close",
-    "5. volume": "Volume"
-}, inplace=True)
-xau_df["Date"] = pd.to_datetime(xau_df["Date"])
+xau_df = pd.read_csv(LOCAL_CSV, thousands=",", quotechar='"', skipinitialspace=True)
+xau_df.columns = xau_df.columns.str.strip()
+xau_df.rename(columns={"Price": "Close", "Change %": "Change_pct"}, inplace=True)
+
+xau_df["Date"] = pd.to_datetime(xau_df["Date"], errors="coerce")
+xau_df.dropna(subset=["Date"], inplace=True)
+
+if "Change_pct" in xau_df.columns:
+    xau_df["Change_pct"] = (
+        xau_df["Change_pct"].astype(str).str.replace("%", "", regex=False).astype(float) / 100.0
+    )
+
+for col in ["Open", "High", "Low", "Close"]:
+    xau_df[col] = pd.to_numeric(xau_df[col], errors="coerce")
+
 xau_df = xau_df[(xau_df["Date"] >= START_DATE) & (xau_df["Date"] <= END_DATE)]
 xau_df = xau_df.sort_values("Date").reset_index(drop=True)
-xau_df["Ticker"] = "XAUUSD"
+print(f"✅ Gold data loaded: {len(xau_df)} rows ({xau_df['Date'].min().date()} → {xau_df['Date'].max().date()})")
 
-# ---------- 1a. Feature Engineering ----------
-# 日收益率
+# ======================================
+# 2. Feature Engineering
+# ======================================
+print("⚙️ Generating gold features...")
+
 xau_df["Return"] = xau_df["Close"].pct_change()
-
-# 移动平均线
+xau_df["LogReturn"] = np.log(xau_df["Close"] / xau_df["Close"].shift(1))
 xau_df["MA5"] = xau_df["Close"].rolling(5).mean()
 xau_df["MA10"] = xau_df["Close"].rolling(10).mean()
-xau_df["MA15"] = xau_df["Close"].rolling(15).mean()
-
-# 波动率 (rolling std)
+xau_df["MA20"] = xau_df["Close"].rolling(20).mean()
 xau_df["Volatility5"] = xau_df["Return"].rolling(5).std()
 xau_df["Volatility10"] = xau_df["Return"].rolling(10).std()
+xau_df["Volatility20"] = xau_df["Return"].rolling(20).std()
 
 xau_df.to_parquet("data/raw/gold_spot_daily.parquet", index=False)
 
-# ---------- 2. Macro Data (FRED) ----------
+# ======================================
+# 3. Fetch Macroeconomic Data (FRED)
+# ======================================
+print("🌍 Fetching macroeconomic data (FRED)...")
+
 fred_symbols = {
     "DXY": "DTWEXBGS",
     "CPI": "CPIAUCSL",
     "FEDFUNDS": "FEDFUNDS",
-    "CRUDE_OIL": "DCOILWTICO"
+    "CRUDE_OIL": "DCOILWTICO",
+    "VIX": "VIXCLS",
+    "US10Y": "DGS10",        # 新增：10年期美债收益率
+    "M2": "M2SL"             # 新增：M2货币供应量
 }
 
-macro_df = pd.DataFrame()
+macro_frames = []
 for label, symbol in fred_symbols.items():
     try:
-        temp = pdr.DataReader(symbol, "fred", START_DATE, END_DATE)
-        temp.rename(columns={symbol: label}, inplace=True)
-        macro_df = pd.concat([macro_df, temp], axis=1)
+        df = pdr.DataReader(symbol, "fred", START_DATE, END_DATE)
+        df = df.rename(columns={symbol: label}).reset_index()
+        df["Date"] = pd.to_datetime(df["DATE"], errors="coerce")
+        df.drop(columns=["DATE"], inplace=True)
+        macro_frames.append(df)
+        print(f"✅ {label} fetched")
     except Exception as e:
-        print(f"⚠️ Failed to fetch {label}: {e}")
+        print(f"⚠️ Failed {label}: {e}")
 
-macro_df = macro_df.reset_index()
-macro_df.rename(columns={macro_df.columns[0]: "Date"}, inplace=True)
-macro_df["Date"] = pd.to_datetime(macro_df["Date"])
+if macro_frames:
+    macro_df = macro_frames[0]
+    for df in macro_frames[1:]:
+        macro_df = pd.merge(macro_df, df, on="Date", how="outer")
+else:
+    macro_df = pd.DataFrame(columns=["Date"])
+
+macro_df = macro_df.sort_values("Date").reset_index(drop=True)
 macro_df.to_parquet("data/raw/macro_fred.parquet", index=False)
 
-# ---------- 3. Stock Indices ----------
-indices = {"S&P500": "^GSPC", "NASDAQ": "^IXIC"}
-index_data = pd.DataFrame()
+# ======================================
+# 4. Fetch Stock Indices (Yahoo Finance)
+# ======================================
+print("📈 Fetching stock indices & commodity prices...")
+
+indices = {
+    "SP500": "^GSPC",
+    "NASDAQ": "^IXIC",
+    "DJIA": "^DJI",           # 新增：道琼斯
+    "GDX": "GDX",             # 黄金矿业ETF
+    "USO": "USO",             # 原油ETF
+    "SI": "SI=F",             # 白银
+    "PL": "PL=F",             # 铂金
+    "PA": "PA=F",             # 钯金
+    "HG": "HG=F"              # 铜
+}
+idx_list = []
 
 for name, ticker in indices.items():
-    df = yf.download(ticker, start=START_DATE, end=END_DATE)[["Close"]].copy()
-    
-    # 避免 MultiIndex
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(-1)
-    
-    df = df.reset_index()  # Date 从 index 转为列
-    df.rename(columns={"Close": name}, inplace=True)
-    df["Date"] = pd.to_datetime(df["Date"])
-    
-    index_data = pd.merge(index_data, df, on="Date", how="outer") if not index_data.empty else df
+    try:
+        df = yf.download(ticker, start=START_DATE, end=END_DATE, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+        if "Close" not in df.columns:
+            print(f"⚠️ {name} missing 'Close' column, skipped.")
+            continue
+        df = df[["Close"]].reset_index()
+        df.rename(columns={"Close": name}, inplace=True)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        idx_list.append(df)
+        print(f"✅ {name} fetched")
+    except Exception as e:
+        print(f"⚠️ Failed {name}: {e}")
 
-# 按日期排序
-index_data = index_data.sort_values("Date").reset_index(drop=True)
-index_data.to_parquet("data/raw/stock_indices.parquet", index=False)
+if idx_list:
+    idx_df = idx_list[0]
+    for df in idx_list[1:]:
+        idx_df = pd.merge(idx_df, df, on="Date", how="outer")
+else:
+    idx_df = pd.DataFrame(columns=["Date"])
 
+idx_df = idx_df.sort_values("Date").reset_index(drop=True)
+idx_df.to_parquet("data/raw/stock_indices.parquet", index=False)
 
-# ---------- 4. Merge All ----------
-merged = xau_df.merge(macro_df, on="Date", how="left")
-merged = pd.merge_asof(
-    merged.sort_values("Date"),
-    index_data.sort_values("Date"),
-    on="Date"
-)
+# ======================================
+# 5. Merge All Data
+# ======================================
+print("🔗 Merging all datasets...")
 
-# ---------- 5. Save ----------
+for df in [xau_df, macro_df, idx_df]:
+    df.columns = df.columns.map(str)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+
+merged = pd.merge_asof(xau_df.sort_values("Date"), macro_df.sort_values("Date"), on="Date")
+merged = pd.merge_asof(merged.sort_values("Date"), idx_df.sort_values("Date"), on="Date")
+merged = merged.drop_duplicates(subset="Date").reset_index(drop=True)
+
+# ======================================
+# 6. Feature Cleanup & Derived Ratios
+# ======================================
+print("🧹 Cleaning up & generating derived ratios...")
+
+# 删除冗余列
+to_drop = ["Change_pct"]
+merged = merged.drop(columns=[c for c in to_drop if c in merged.columns], errors="ignore")
+
+# 前向填充 + 后向填充（确保月度宏观指标对齐到每日）
+merged = merged.ffill().bfill()
+
+# 去掉因rolling而产生的前期NaN
+merged = merged.dropna(subset=["MA20", "Volatility20"]).reset_index(drop=True)
+
+# 比率特征
+if "DXY" in merged.columns:
+    merged["Gold_vs_DXY"] = merged["Close"] / merged["DXY"]
+if "SP500" in merged.columns:
+    merged["Gold_vs_SP500"] = merged["Close"] / merged["SP500"]
+if "SI" in merged.columns:
+    merged["Gold_vs_Silver"] = merged["Close"] / merged["SI"]
+
+# ======================================
+# 7. Save Final Dataset
+# ======================================
 merged.to_csv(FINAL_CSV, index=False)
 merged.to_parquet(FINAL_PARQUET, index=False)
 
-print(f"✅ Final dataset saved: {FINAL_PARQUET} & {FINAL_CSV}")
-print(f"Shape: {merged.shape}")
-print(f"Date range: {merged['Date'].min()} → {merged['Date'].max()}")
-print("Most common gap (days):", merged['Date'].diff().dropna().mode()[0].days)
-print("Sample rows:")
-print(merged.head())
+print("\n✅ Final dataset generated successfully:")
+print(f"📄 CSV: {FINAL_CSV}")
+print(f"📦 Parquet: {FINAL_PARQUET}")
+print(f"📊 Shape: {merged.shape}")
+print(f"📅 Date Range: {merged['Date'].min().date()} → {merged['Date'].max().date()}")
+print(f"🧠 Columns: {list(merged.columns)}")

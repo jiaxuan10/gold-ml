@@ -1,176 +1,231 @@
+# train_xgb_detrend_enhanced_v2.py
 """
-train_xgb_v3.py
---------------------------------------------
-Optimized XGBoost regression model for predicting
-next-day gold price return (%), with advanced features
-and time-series validation.
+Enhanced regression + dynamic quantile classification pipeline for gold next-day / 5-day signal.
 
-Author: Lim Jia Xuan
+Improvements:
+- Regression target (detrended_ret_next) instead of strict Q30-Q70 binary
+- Shorter detrend window (63)
+- Extended lag features
+- Optional horizon (1-day / 5-day)
+- Macro features lagged
+- Dynamic threshold based on train quantiles
 """
-
 import os
-import pandas as pd
+import warnings
+warnings.filterwarnings("ignore")
 import numpy as np
-import matplotlib.pyplot as plt
-from xgboost import XGBRegressor, plot_importance
-from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, accuracy_score
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import TimeSeriesSplit, RandomizedSearchCV
+from sklearn.metrics import (
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix, balanced_accuracy_score
+)
+import joblib
+import xgboost as xgb
+from sklearn.ensemble import RandomForestRegressor, StackingRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from xgboost.sklearn import XGBRegressor
+from sklearn.metrics import confusion_matrix, accuracy_score, balanced_accuracy_score, precision_score, recall_score, f1_score
 
-# ===============================
-# 1️⃣ CONFIGURATION
-# ===============================
-DATA_PATH = "./cleaned_gold_dataset.csv"
-OUTPUT_DIR = "outputs/figures"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+RSEED = 42
+np.random.seed(RSEED)
 
-# ===============================
-# 2️⃣ LOAD DATA
-# ===============================
-print("📂 Loading dataset...")
+# ---------- CONFIG ----------
+DATA_PATH = "data/final/final_dataset_daily.csv"
+MODEL_DIR = "models"
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+TEST_DAYS = 365
+LONG_W = 63           # short-term detrend
+LAG_DAYS = [1,2,3,5,10,15,20,30]
+HORIZON = 5           # 可改为1/5天
+USE_REGRESSION = True
+Q_LOW = 0.4
+Q_HIGH = 0.6
+TS_SPLITS = 5
+
+MACRO_COLS = ['DXY','CPI','CRUDE_OIL','VIX','SP500','US10Y','M2']
+
+# ---------- LOAD ----------
 df = pd.read_csv(DATA_PATH)
+df['Date'] = pd.to_datetime(df['Date'])
+df = df.sort_values('Date').reset_index(drop=True)
+print(f"Loaded {len(df)} rows: {df['Date'].min().date()} -> {df['Date'].max().date()}")
 
-if "Date" in df.columns:
-    df["Date"] = pd.to_datetime(df["Date"])
+df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+df = df.dropna(subset=['Close']).reset_index(drop=True)
 
-print(f"✅ Loaded dataset with shape: {df.shape}")
-print(f"Date range: {df['Date'].min().date()} → {df['Date'].max().date()}")
+# ---------- FEATURES ----------
+df['log_price'] = np.log(df['Close'])
+df['LogReturn'] = df['log_price'].diff()
+df['Return'] = df['Close'].pct_change()
+df['Diff_Close'] = df['Close'].diff()
 
-# ===============================
-# 3️⃣ BASIC CLEANING
-# ===============================
-macro_cols = ["CPI", "FEDFUNDS", "DXY", "CRUDE_OIL"]
-for col in macro_cols:
+# Macro features
+if 'CPI' in df.columns:
+    df['CPI'] = df['CPI'].fillna(method='ffill')
+for col in MACRO_COLS:
     if col in df.columns:
-        df[col] = df[col].ffill()  # 推荐写法 (取代 fillna(method='ffill'))
+        if col == 'CPI':
+            df[f'{col}_chg'] = df[col].diff()
+        else:
+            df[f'{col}_chg'] = df[col].pct_change()
+macro_derived = [c for c in df.columns if any(c.startswith(m) and c.endswith('_chg') for m in MACRO_COLS)]
 
-df = df.drop_duplicates(subset=["Date"]).reset_index(drop=True)
+# ---------- Detrend ----------
+df['trend_long'] = df['log_price'].rolling(LONG_W, min_periods=int(LONG_W/4)).mean()
+df['detrended'] = df['log_price'] - df['trend_long']
+df['detrended_ret_next'] = df['detrended'].shift(-HORIZON) - df['detrended']
 
-# ===============================
-# 4️⃣ FEATURE ENGINEERING
-# ===============================
-# Target: next-day return
-df["Target"] = df["Close"].shift(-1) / df["Close"] - 1
+df = df.dropna(subset=['log_price','trend_long','detrended','detrended_ret_next']).reset_index(drop=True)
+print(f"After detrend processing: {len(df)} rows remain")
 
-# Lag features
-for lag in range(1, 6):
-    df[f"Close_lag{lag}"] = df["Close"].shift(lag)
-    df[f"Return_lag{lag}"] = df["Target"].shift(lag)
-
-# Rolling stats (technical indicators)
-df["MA5"] = df["Close"].rolling(5).mean()
-df["MA10"] = df["Close"].rolling(10).mean()
-df["Volatility5"] = df["Target"].rolling(5).std()
-df["Momentum10"] = df["Close"] / df["Close"].shift(10) - 1
-df["RSI14"] = 100 - (100 / (1 + (df["Target"].rolling(14).apply(lambda x: (x[x > 0].mean() / abs(x[x < 0].mean())) if len(x[x < 0]) > 0 else 0.0))))
-
-# Drop missing
-df = df.dropna().reset_index(drop=True)
-print(f"✅ After feature engineering: {df.shape}")
-
-# ===============================
-# 5️⃣ DEFINE FEATURES
-# ===============================
-features = [
-    "Open", "High", "Low", "Volume",
-    "MA5", "MA10", "Volatility5", "Momentum10", "RSI14",
-    "DXY", "CPI", "FEDFUNDS", "CRUDE_OIL", "^GSPC", "^IXIC",
-    "Close_lag1", "Close_lag2", "Close_lag3", "Close_lag4", "Close_lag5",
-    "Return_lag1", "Return_lag2", "Return_lag3", "Return_lag4", "Return_lag5"
+# ---------- FEATURE ENGINEERING ----------
+candidate = [
+ "Open","High","Low","Close","log_price","LogReturn","Return","Diff_Close",
+ "MA5","MA10","MA20",
+ "Volatility5","Volatility10","Volatility20"
+] + macro_derived + [
+ "GDX","USO","SI","PL","PA","HG",
+ "Gold_vs_DXY","Gold_vs_SP500","Gold_vs_Silver"
 ]
 
-X = df[features].copy()
-y = df["Target"]
+features = [c for c in candidate if c in df.columns]
+df.loc[:, 'DayOfWeek'] = df['Date'].dt.weekday
+features.append('DayOfWeek')
 
-low_var_cols = [c for c in X.columns if X[c].std() < 1e-8]
-if low_var_cols:
-    X = X.drop(columns=low_var_cols)
-    print(f"⚠️ Dropped low-variance columns: {low_var_cols}")
+# Lagged log returns
+for lag in LAG_DAYS:
+    col = f'logret_lag_{lag}'
+    df.loc[:, col] = df['LogReturn'].shift(lag)
+    features.append(col)
 
-# ===============================
-# 6️⃣ TIME SERIES CV + TUNING
-# ===============================
-print("\n🔍 Performing time-series CV tuning...")
-tscv = TimeSeriesSplit(n_splits=5)
+# MA diff
+if 'MA5' in df.columns and 'MA10' in df.columns:
+    df.loc[:, 'MA5_MA10_diff'] = df['MA5'] - df['MA10']
+    features.append('MA5_MA10_diff')
 
-param_grid = {
-    "max_depth": [6, 8, 10],
-    "learning_rate": [0.01, 0.03, 0.05],
-    "n_estimators": [500, 800],
-    "subsample": [0.8, 1.0],
-    "colsample_bytree": [0.8, 1.0],
-    "reg_lambda": [1, 2],
-}
-
-grid = GridSearchCV(
-    XGBRegressor(random_state=42, objective="reg:squarederror"),
-    param_grid,
-    cv=tscv,
-    scoring="neg_root_mean_squared_error",
-    n_jobs=-1,
-    verbose=1
+# detrended z-score
+df.loc[:, 'detrended_z'] = (df['detrended'] - df['detrended'].rolling(LONG_W, min_periods=30).mean()) / (
+    df['LogReturn'].rolling(LONG_W, min_periods=30).std().replace(0, np.nan)
 )
+features += ['detrended','detrended_z']
 
-grid.fit(X, y)
-best_model = grid.best_estimator_
-print(f"\n✅ Best params: {grid.best_params_}")
+features = [f for f in pd.unique(features) if f in df.columns]
+df = df.dropna(subset=features + ['detrended_ret_next']).reset_index(drop=True)
+print(f"After feature construction: {len(df)} rows (features count: {len(features)})")
 
-# ===============================
-# 7️⃣ FINAL TRAIN/TEST SPLIT
-# ===============================
-split_idx = int(len(X) * 0.8)
-X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+# ---------- SPLIT ----------
+X = df[features].copy()
+y_cont = df['detrended_ret_next'].copy()
+dates = df['Date'].copy()
 
-best_model.fit(X_train, y_train)
-y_pred = best_model.predict(X_test)
+X_train = X.iloc[:-TEST_DAYS].reset_index(drop=True)
+y_train = y_cont.iloc[:-TEST_DAYS].reset_index(drop=True)
+X_test = X.iloc[-TEST_DAYS:].reset_index(drop=True)
+y_test = y_cont.iloc[-TEST_DAYS:].reset_index(drop=True)
+dates_test = dates.iloc[-TEST_DAYS:].reset_index(drop=True)
 
-# ===============================
-# 8️⃣ EVALUATION
-# ===============================
-rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-mae = mean_absolute_error(y_test, y_pred)
-r2 = r2_score(y_test, y_pred)
+# ---------- SCALE ----------
+scaler = StandardScaler()
+X_train_s = scaler.fit_transform(X_train)
+X_test_s = scaler.transform(X_test)
+joblib.dump(scaler, os.path.join(MODEL_DIR, "scaler_detrend_enhanced_v2.pkl"))
 
-# Direction accuracy (up/down)
-actual_dir = np.sign(y_test)
-pred_dir = np.sign(y_pred)
-direction_acc = accuracy_score(actual_dir, pred_dir)
+# ---------- XGB Regressor ----------
+xgb_reg = xgb.XGBRegressor(
+    n_estimators=300,
+    max_depth=4,
+    learning_rate=0.03,
+    subsample=0.6,
+    colsample_bytree=1.0,
+    random_state=RSEED,
+    n_jobs=-1
+)
+xgb_reg.fit(X_train_s, y_train)
+joblib.dump(xgb_reg, os.path.join(MODEL_DIR,"xgb_reg_detrend_enhanced_v2.pkl"))
+print("Saved XGB regressor")
 
-print("\n🎯 Final Evaluation:")
-print(f"   RMSE: {rmse:.6f}")
-print(f"   MAE:  {mae:.6f}")
-print(f"   R²:   {r2:.4f}")
-print(f"   Direction Accuracy: {direction_acc * 100:.2f}%")
+# ---------- Random Forest Regressor ----------
+rf_reg = RandomForestRegressor(
+    n_estimators=300,
+    random_state=RSEED,
+    n_jobs=-1
+)
+rf_reg.fit(X_train_s, y_train)
+joblib.dump(rf_reg, os.path.join(MODEL_DIR,"rf_reg_detrend_enhanced_v2.pkl"))
+print("Saved RF regressor")
 
-# ===============================
-# 9️⃣ VISUALIZATION
-# ===============================
-comparison = pd.DataFrame({
-    "Date": df["Date"].iloc[split_idx:].values,
-    "Actual_Return": y_test.values,
-    "Predicted_Return": y_pred
+# ---------- Optional Stacking ----------
+do_stacking = True
+if do_stacking:
+    stack = StackingRegressor(
+        estimators=[('xgb', xgb_reg), ('rf', rf_reg)],
+        final_estimator=LinearRegression(),
+        n_jobs=-1,
+        passthrough=False
+    )
+    stack.fit(X_train_s, y_train)
+    joblib.dump(stack, os.path.join(MODEL_DIR,"stack_reg_detrend_enhanced_v2.pkl"))
+    print("Saved stacking regressor")
+
+# ---------- Predictions & dynamic thresholds ----------
+xgb_pred_test = xgb_reg.predict(X_test_s)
+rf_pred_test = rf_reg.predict(X_test_s)
+if do_stacking:
+    stack_pred_test = stack.predict(X_test_s)
+
+# Train quantiles as thresholds
+q_low_val = y_train.quantile(Q_LOW)
+q_high_val = y_train.quantile(Q_HIGH)
+
+def reg2signal(pred, ql, qh):
+    return np.where(pred <= ql, 0, np.where(pred >= qh, 1, 2))
+
+pred_df = pd.DataFrame({
+    'Date': dates_test,
+    'True': y_test,
+    'XGB_pred': xgb_pred_test,
+    'XGB_signal': reg2signal(xgb_pred_test,q_low_val,q_high_val),
+    'RF_pred': rf_pred_test,
+    'RF_signal': reg2signal(rf_pred_test,q_low_val,q_high_val)
 })
+if do_stacking:
+    pred_df['STACK_pred'] = stack_pred_test
+    pred_df['STACK_signal'] = reg2signal(stack_pred_test,q_low_val,q_high_val)
 
-plt.figure(figsize=(12, 6))
-plt.plot(comparison["Date"], comparison["Actual_Return"], label="Actual", color="black", alpha=0.8)
-plt.plot(comparison["Date"], comparison["Predicted_Return"], label="Predicted", color="orange", alpha=0.8)
-plt.title("Gold Next-Day Return Prediction (Optimized XGBoost)")
-plt.xlabel("Date")
-plt.ylabel("Return")
-plt.legend()
-plt.tight_layout()
-save_path = os.path.join(OUTPUT_DIR, "gold_return_pred_vs_actual_v3.png")
-plt.savefig(save_path, dpi=300)
-plt.show()
-print(f"📈 Prediction plot saved to: {save_path}")
+pred_csv_path = os.path.join(MODEL_DIR,"predictions_detrend_enhanced_v2.csv")
+pred_df.to_csv(pred_csv_path,index=False)
+print("Saved predictions to", pred_csv_path)
 
-# ===============================
-# 🔟 FEATURE IMPORTANCE
-# ===============================
-plt.figure(figsize=(10, 6))
-plot_importance(best_model, max_num_features=15)
-plt.title("Top Feature Importances")
-plt.tight_layout()
-plt.show()
+print("\nDone.")
 
-print("\n🚀 Training & evaluation complete!")
+# ---------- Directional accuracy & confusion matrix ----------
+from sklearn.metrics import confusion_matrix, accuracy_score, balanced_accuracy_score, precision_score, recall_score, f1_score
+
+# 根据训练集 quantile 生成 True_signal
+df_bin = pred_df[pred_df['True'].apply(lambda x: 0 if x<=q_low_val else (1 if x>=q_high_val else 2)) != 2].copy()
+df_bin['True_signal'] = df_bin['True'].apply(lambda x: 0 if x<=q_low_val else 1)
+
+# 过滤模型 signal 中非 0/1 的情况
+for col in ['XGB_signal','RF_signal','STACK_signal']:
+    if col in df_bin.columns:
+        df_bin = df_bin[df_bin[col].isin([0,1])]
+
+def print_metrics(name, true_labels, pred_labels):
+    print(f"\n--- {name} ---")
+    print("Accuracy:", accuracy_score(true_labels, pred_labels))
+    print("Balanced Acc:", balanced_accuracy_score(true_labels, pred_labels))
+    print("Precision:", precision_score(true_labels, pred_labels, average='binary', zero_division=0))
+    print("Recall:", recall_score(true_labels, pred_labels, average='binary', zero_division=0))
+    print("F1:", f1_score(true_labels, pred_labels, average='binary', zero_division=0))
+    print("Confusion:\n", confusion_matrix(true_labels, pred_labels))
+
+# XGB
+print_metrics("XGB directional", df_bin['True_signal'], df_bin['XGB_signal'])
+# RF
+print_metrics("RF directional", df_bin['True_signal'], df_bin['RF_signal'])
+# STACK
+if do_stacking and 'STACK_signal' in df_bin.columns:
+    print_metrics("STACK directional", df_bin['True_signal'], df_bin['STACK_signal'])

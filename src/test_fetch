@@ -1,0 +1,6 @@
+import kagglehub
+
+# Download latest version
+path = kagglehub.dataset_download("novandraanugrah/xauusd-gold-price-historical-data-2004-2024")
+
+print("Path to dataset files:", path)
