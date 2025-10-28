@@ -100,21 +100,32 @@ macro_df = macro_df.sort_values("Date").reset_index(drop=True)
 macro_df.to_parquet("data/raw/macro_fred.parquet", index=False)
 
 # ======================================
-# 4. Fetch Stock Indices (Yahoo Finance)
+# 4. Fetch Stock Indices, Crypto & FX (Yahoo Finance)
 # ======================================
-print("📈 Fetching stock indices & commodity prices...")
+print("📈 Fetching stock indices, crypto & FX data...")
 
 indices = {
+    # ---- Equity & Commodities ----
     "SP500": "^GSPC",
     "NASDAQ": "^IXIC",
-    "DJIA": "^DJI",           # 新增：道琼斯
-    "GDX": "GDX",             # 黄金矿业ETF
-    "USO": "USO",             # 原油ETF
-    "SI": "SI=F",             # 白银
-    "PL": "PL=F",             # 铂金
-    "PA": "PA=F",             # 钯金
-    "HG": "HG=F"              # 铜
+    "DJIA": "^DJI",
+    "GDX": "GDX",           # 黄金矿业ETF
+    "USO": "USO",           # 原油ETF
+    "SI": "SI=F",           # 白银
+    "PL": "PL=F",           # 铂金
+    "PA": "PA=F",           # 钯金
+    "HG": "HG=F",           # 铜
+
+    # ---- Crypto ----
+    "BTCUSD": "BTC-USD",
+    "ETHUSD": "ETH-USD",
+
+    # ---- Major FX pairs ----
+    "EURUSD": "EURUSD=X",
+    "USDJPY": "JPY=X",
+    "GBPUSD": "GBPUSD=X"
 }
+
 idx_list = []
 
 for name, ticker in indices.items():
@@ -141,8 +152,7 @@ else:
     idx_df = pd.DataFrame(columns=["Date"])
 
 idx_df = idx_df.sort_values("Date").reset_index(drop=True)
-idx_df.to_parquet("data/raw/stock_indices.parquet", index=False)
-
+idx_df.to_parquet("data/raw/market_assets.parquet", index=False)
 # ======================================
 # 5. Merge All Data
 # ======================================
@@ -178,7 +188,17 @@ if "SP500" in merged.columns:
     merged["Gold_vs_SP500"] = merged["Close"] / merged["SP500"]
 if "SI" in merged.columns:
     merged["Gold_vs_Silver"] = merged["Close"] / merged["SI"]
-
+# Crypto & FX 比率
+if "BTCUSD" in merged.columns:
+    merged["Gold_vs_BTC"] = merged["Close"] / merged["BTCUSD"]
+if "ETHUSD" in merged.columns:
+    merged["Gold_vs_ETH"] = merged["Close"] / merged["ETHUSD"]
+if "EURUSD" in merged.columns:
+    merged["Gold_vs_EURUSD"] = merged["Close"] / merged["EURUSD"]
+if "USDJPY" in merged.columns:
+    merged["Gold_vs_USDJPY"] = merged["Close"] / merged["USDJPY"]
+if "GBPUSD" in merged.columns:
+    merged["Gold_vs_GBPUSD"] = merged["Close"] / merged["GBPUSD"]
 # ======================================
 # 7. Save Final Dataset
 # ======================================
