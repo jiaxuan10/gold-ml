@@ -54,7 +54,7 @@ OUTPUT_DIR = "models"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # labeling threshold: ignore tiny moves (tunable)
-LABEL_THRESHOLD = 0.0005      # 0.1% move required to count as up/down
+LABEL_THRESHOLD = 0.0003     # 0.1% move required to count as up/down
 
 # validation fraction inside the train region (for threshold tuning)
 INNER_VAL_FRAC = 0.1         # last 10% of training used as validation for threshold tuning
@@ -111,6 +111,12 @@ def add_technical_features(df):
 
     # ma differences
     df["ma5_ma20"] = df["sma_5"] - df["sma_20"]
+    # --- Structural / volatility ratio features ---
+    df["high_break"] = (df["Close"] > df["High"].rolling(24).max()).astype(int)
+    df["low_break"] = (df["Close"] < df["Low"].rolling(24).min()).astype(int)
+    df["vol_ratio"] = df["vol_5"] / df["vol_5"].rolling(20).mean()
+    df["ret_accel"] = df["Close"].pct_change() - df["Close"].pct_change(2)
+    df["rsi_macd_interact"] = df["rsi"] * df["macd"]
 
     return df
 
@@ -206,7 +212,13 @@ def main(csv_path=CSV_PATH):
     # ---------- Base Models ----------
     base_models = {
         "rf": RandomForestClassifier(n_estimators=300, max_depth=10, random_state=RND),
-        "gb": GradientBoostingClassifier(n_estimators=300, learning_rate=0.05, max_depth=4, random_state=RND),
+        "gb": GradientBoostingClassifier(
+                n_estimators=400,
+                learning_rate=0.03,
+                max_depth=5,
+                subsample=0.9,
+                random_state=RND
+            ),
         "svc": Pipeline([
             ("scaler", StandardScaler()),
             ("model", SVC(C=2.0, kernel="rbf", gamma="scale", probability=True, random_state=RND))
@@ -222,8 +234,14 @@ def main(csv_path=CSV_PATH):
     }
     if XGBOOST_AVAILABLE:
         base_models["xgb"] = xgb.XGBClassifier(
-            n_estimators=300, learning_rate=0.05, max_depth=5, eval_metric='logloss', use_label_encoder=False, random_state=RND
-        )
+                                n_estimators=400,
+                                learning_rate=0.03,
+                                max_depth=6,
+                                subsample=0.9,
+                                colsample_bytree=0.8,
+                                reg_lambda=2.0,
+                                eval_metric='logloss',
+                                random_state=RND        )
 
     # ---------- TimeSeries CV training ----------
     results = {}
@@ -293,7 +311,7 @@ def main(csv_path=CSV_PATH):
     estimators = [(n, trained_models[n]) for n in top_models]
 
     # compute weights by cv_mean (positive)
-    weights_raw = np.array([results[n]["cv_mean"] for n in top_models], dtype=float)
+    weights_raw = np.array([results[n]["test_f1"] for n in top_models], dtype=float)
     if weights_raw.sum() == 0:
         weights = np.ones_like(weights_raw) / len(weights_raw)
     else:
@@ -339,7 +357,7 @@ def main(csv_path=CSV_PATH):
     best_thr = 0.5
     best_f1_val = -1.0
     if proba_val is not None:
-        for thr in np.arange(0.3, 0.71, 0.01):
+        for thr in np.arange(0.1, 0.91, 0.02):
             y_pred_thr = (proba_val > thr).astype(int)
             # ✅ 用 validation 的真实标签
             f1_thr = f1_score(y_val_inner, y_pred_thr)

@@ -1,259 +1,542 @@
+#!/usr/bin/env python3
 """
-simulate_trading_v4_regime_aware.py
-----------------------------------
-Advanced simulated trading with market regime adaptation.
-
-✓ Loads latest ensemble model (stacking/voting)
-✓ Applies same feature logic from training
-✓ Detects market regimes dynamically (bull / bear / neutral)
-✓ Regime-aware signal weighting and stop-loss control
-✓ Signal filtering with probability thresholds
-✓ Full backtesting metrics and equity curve visualization
-
-Author: Lim Jia Xuan (v4)
+simulate_trading_v6_profit_boost_updated.py
+-------------------------------------------
+Updated Profit-Boost backtester for Gold Scalper (v6 -> v6.1)
+Changes aimed to increase realized profit while keeping risk controls:
+ - Larger risk per trade (but still fraction-based & confidence-weighted)
+ - Higher max position fraction
+ - Smaller ATR stop, larger ATR take-profit (improve RR)
+ - Looser signal / vol filters to increase trade frequency
+ - Optional shorting enabled (symmetric logic)
+ - Keeps commission/slippage modeling and compounding
+Author: adapted for Lim Jia Xuan (Profit-Boost v6.1)
 """
 
-import os
-import sys
-import pickle
-import pandas as pd
-import numpy as np
+import os, sys, pickle
 from datetime import datetime
+from typing import Optional, Dict
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
-# === Path fix for imports ===
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../model")))
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../utils")))
-
-# === Try import feature function from training ===
-try:
-    from train_xgb import add_technical_features
-except Exception:
-    try:
-        from train_gold_model import add_technical_features
-    except Exception:
-        add_technical_features = None
-        print("⚠️ Could not import add_technical_features; using raw columns.")
-
-# === Try import market regime detector ===
-try:
-    from market_regime_detector_custom import MarketRegimeDetector
-except Exception:
-    MarketRegimeDetector = None
-    print("⚠️ Could not import MarketRegimeDetector; continuing without it.")
-
-# === CONFIG ===
-MODEL_DIR = "models"
-DATA_PATH = "data/final/final_dataset_daily.csv"
-INITIAL_CAPITAL = 10000.0
-SAVE_DIR = "backtest_results"
+# ---------------- CONFIG ----------------
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+MODEL_DIR = os.path.join(ROOT, "models")
+DATA_PATH = os.path.join(ROOT, "data", "final", "final_dataset_hourly.csv")
+SAVE_DIR = os.path.join(ROOT, "backtest_results")
 os.makedirs(SAVE_DIR, exist_ok=True)
-PLOT = True
 
+SEED = 42
+np.random.seed(SEED)
 
-# === HELPERS ===
+INITIAL_CAPITAL = 10000.0
+
+# Risk sizing (more aggressive but still capped)
+RISK_PER_TRADE_FRAC = 0.05   # increased from 0.03 -> risk 5% of equity base (scaled by confidence)
+MAX_POSITION_FRAC = 0.50     # cap: don't allocate more than 50% of equity to a single position
+
+# ATR / stop / tp (improve RR)
+ATR_WINDOW = 14
+ATR_MULTIPLIER_SL = 1.8     # tighter stop
+ATR_MULTIPLIER_TP = 3.2     # larger take-profit
+MIN_STOP_PCT = 0.001        # minimum stop distance as fraction of price (0.1%)
+
+# Volatility filter
+VOL_WINDOW = 24             # hours
+VOL_THRESHOLD_PCTL = 0.90   # skip trading if recent vol > 90th percentile (looser than before)
+
+# Model thresholds & fallback (looser)
+BUY_PROB_DEFAULT = 0.52 
+SELL_PROB_DEFAULT = 0.48
+MIN_CONFIDENCE = 0.35        # require confidence >= this to trade (after mapping)
+MIN_PROBA_FOR_SIGNAL = 0.50
+
+# Costs
+COMMISSION = 0.0005  # proportional
+SLIPPAGE = 0.0005
+
+REGIME_WEIGHTS = {"bull": 1.0, "neutral": 0.9, "bear": 0.7}
+
+# Enable shorting (symmetric)
+ENABLE_SHORTS = True
+
+# ---------------- Utilities ----------------
 def load_latest_model(model_dir: str):
-    model_files = sorted(
+    pkl_files = sorted(
         [f for f in os.listdir(model_dir) if f.endswith(".pkl")],
-        key=lambda x: os.path.getmtime(os.path.join(model_dir, x)),
+        key=lambda f: os.path.getmtime(os.path.join(model_dir, f)),
         reverse=True,
     )
-    for f in model_files:
-        if "stacking" in f or "voting" in f:
-            print(f"✅ Loaded model: {f}")
-            with open(os.path.join(model_dir, f), "rb") as fp:
-                return pickle.load(fp)
-    raise FileNotFoundError("No ensemble model (.pkl) found in /models")
+    if not pkl_files:
+        raise FileNotFoundError(f"No .pkl model files found in {model_dir}")
+    for f in pkl_files:
+        path = os.path.join(model_dir, f)
+        try:
+            with open(path, "rb") as fd:
+                obj = pickle.load(fd)
+            print(f"✅ Loaded model file: {f}")
+            if isinstance(obj, dict):
+                return obj
+            else:
+                return {"model": obj}
+        except Exception as e:
+            print(f"⚠️ Failed to load {f}: {e}")
+    raise RuntimeError("No valid model found.")
 
+def safe_feature_align(X: pd.DataFrame, model_meta: dict) -> pd.DataFrame:
+    Xc = X.copy()
+    feat_required = None
+    if isinstance(model_meta, dict) and model_meta.get("feature_cols"):
+        feat_required = list(model_meta["feature_cols"])
+    else:
+        model = None
+        if isinstance(model_meta, dict):
+            model = model_meta.get("calibrated_model") or model_meta.get("raw_ensemble") or model_meta.get("model")
+        else:
+            model = model_meta
+        if model is not None and hasattr(model, "feature_names_in_"):
+            feat_required = list(model.feature_names_in_)
+    if feat_required is not None:
+        missing = [f for f in feat_required if f not in Xc.columns]
+        if missing:
+            print(f"⚠️ Missing features (filling 0): {missing[:10]}{'...' if len(missing)>10 else ''}")
+            for m in missing:
+                Xc[m] = 0.0
+        Xc = Xc[feat_required]
+    Xc = Xc.replace([np.inf, -np.inf], np.nan)
+    Xc = Xc.fillna(Xc.median().fillna(0.0))
+    Xc = Xc.clip(lower=-1e6, upper=1e6)
+    return Xc
 
-def compute_metrics(df):
-    total_profit = df["equity"].iloc[-1] - INITIAL_CAPITAL
-    total_return = (df["equity"].iloc[-1] / INITIAL_CAPITAL - 1) * 100
-    sharpe = (
-        np.sqrt(252) * df["strategy_ret"].mean() / df["strategy_ret"].std()
-        if df["strategy_ret"].std() != 0
-        else 0.0
-    )
-    win_rate = (df["strategy_ret"] > 0).mean() * 100
-    max_dd = (df["equity"] / df["equity"].cummax() - 1).min() * 100
+def model_predict_proba(model_meta, X: pd.DataFrame) -> Optional[np.ndarray]:
+    """Try to get probabilities from saved metadata dict or raw model."""
+    if isinstance(model_meta, dict):
+        for key in ("calibrated_model", "raw_ensemble", "model"):
+            m = model_meta.get(key)
+            if m is None:
+                continue
+            try:
+                return m.predict_proba(X)
+            except Exception:
+                # try averaging estimator probs if ensemble-like
+                try:
+                    ests = getattr(m, "estimators_", getattr(m, "estimators", []))
+                    probs = []
+                    for e in ests:
+                        try:
+                            p = e.predict_proba(X)
+                            probs.append(p)
+                        except Exception:
+                            continue
+                    if probs:
+                        return sum(probs) / len(probs)
+                except Exception:
+                    pass
+    else:
+        try:
+            return model_meta.predict_proba(X)
+        except Exception:
+            try:
+                ests = getattr(model_meta, "estimators_", [])
+                probs = []
+                for e in ests:
+                    try:
+                        p = e.predict_proba(X)
+                        probs.append(p)
+                    except Exception:
+                        continue
+                if probs:
+                    return sum(probs) / len(probs)
+            except Exception:
+                pass
+    return None
+
+# ATR helper
+def compute_atr(df: pd.DataFrame, window: int = ATR_WINDOW, col_high="High", col_low="Low", col_close="Close"):
+    h = df[col_high]
+    l = df[col_low]
+    c = df[col_close].shift(1)
+    hl = h - l
+    hc = (h - c).abs()
+    lc = (l - c).abs()
+    tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+    atr = tr.rolling(window, min_periods=3).mean()
+    return atr.fillna(method="bfill").fillna(0.0)
+
+# backtest metrics (same style)
+def compute_backtest_metrics(equity_series: pd.Series, strategy_rets: pd.Series, freq_per_year: int = 252*24):
+    total_return = equity_series.iloc[-1] / equity_series.iloc[0] - 1.0
+    n_periods = len(strategy_rets)
+    years = n_periods / freq_per_year if freq_per_year>0 else np.nan
+    cagr = (equity_series.iloc[-1] / equity_series.iloc[0]) ** (1 / years) - 1 if years > 0 else np.nan
+    ann_vol = strategy_rets.std() * np.sqrt(freq_per_year) if n_periods>1 else 0.0
+    ann_ret = strategy_rets.mean() * freq_per_year
+    sharpe = ann_ret / ann_vol if ann_vol > 0 else np.nan
+    neg = strategy_rets[strategy_rets < 0]
+    downside = neg.std() * np.sqrt(freq_per_year) if len(neg)>0 else 0.0
+    sortino = ann_ret / downside if downside > 0 else np.nan
+    roll_max = equity_series.cummax()
+    max_dd = (equity_series / roll_max - 1.0).min()
+    win_rate = (strategy_rets > 0).mean()
     return {
-        "final_equity": df["equity"].iloc[-1],
-        "total_profit": total_profit,
-        "total_return_%": total_return,
-        "sharpe_ratio": sharpe,
-        "win_rate_%": win_rate,
-        "max_drawdown_%": max_dd,
+        "total_return": float(total_return),
+        "cagr": float(cagr) if not np.isnan(cagr) else None,
+        "annualized_return": float(ann_ret),
+        "annualized_vol": float(ann_vol) if not np.isnan(ann_vol) else None,
+        "sharpe": float(sharpe) if not np.isnan(sharpe) else None,
+        "sortino": float(sortino) if not np.isnan(sortino) else None,
+        "max_drawdown": float(max_dd),
+        "win_rate": float(win_rate)
     }
 
-
-def visualize_equity(df, save_path):
-    plt.figure(figsize=(10, 5))
-    plt.plot(df["Date"], df["equity"], color="gold", label="Equity Curve")
-    plt.title("Simulated Equity Curve (Regime-aware)", fontsize=14)
+def visualize_equity(dates, equity, outpath, title="Equity Curve"):
+    plt.figure(figsize=(12,5))
+    plt.plot(dates, equity, label="Equity")
+    plt.fill_between(dates, equity, pd.Series(equity).cummax(), where=(equity < pd.Series(equity).cummax()), color="red", alpha=0.15)
+    plt.title(title)
     plt.xlabel("Date")
-    plt.ylabel("Equity ($)")
+    plt.ylabel("Equity")
+    plt.grid(alpha=0.3)
     plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.6)
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(outpath)
     plt.close()
-    print(f"📈 Saved equity chart → {save_path}")
+    print(f"Saved chart → {outpath}")
 
-
-# === MAIN ===
-def simulate_trading():
-    if not os.path.exists(DATA_PATH):
-        raise FileNotFoundError(f"Dataset not found: {DATA_PATH}")
-
-    df = pd.read_csv(DATA_PATH)
-    if "Date" not in df.columns:
-        df.reset_index(inplace=True)
-        df.rename(columns={"index": "Date"}, inplace=True)
+# ---------------- Main simulation ----------------
+def simulate_backtest(
+    data_path: str = DATA_PATH,
+    model_dir: str = MODEL_DIR,
+    initial_capital: float = INITIAL_CAPITAL,
+    save_dir: str = SAVE_DIR
+):
+    # load data
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(data_path)
+    
+    df = pd.read_csv(data_path)
+    # compat rename
+    rename_map = {"GOLD_Close":"Close","GOLD_Open":"Open","GOLD_High":"High","GOLD_Low":"Low"}
+    df = df.rename(columns=rename_map)
+    if "Close" not in df.columns:
+        raise ValueError("CSV must include Close column")
+    
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date", "Close"]).reset_index(drop=True)
-    df["Return"] = df["Close"].pct_change()
-    df = df.dropna().reset_index(drop=True)
+    df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    # compute returns and ATR, vol
+    df["return"] = df["Close"].pct_change().fillna(0.0)
+    df["logret"] = np.log(df["Close"] / df["Close"].shift(1)).fillna(0.0)
+    # compute ATR
+    df["ATR"] = compute_atr(df, window=ATR_WINDOW, col_high="High", col_low="Low", col_close="Close")
+    # rolling vol (std of returns)
+    df["vol_24h"] = df["return"].rolling(VOL_WINDOW).std().fillna(method="bfill").fillna(0.0)
+    # Attempt to import user's feature generator
+    add_feats = None
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "src", "model"))
+        from train_xgb_v2 import add_technical_features as add_feats
+        print("✅ Loaded add_technical_features from train_xgb_v2")
+    except Exception as e:
+        print(f"⚠️ Failed to import add_technical_features from train_xgb_v2: {e}")
 
-    # === Add Features ===
-    if add_technical_features is not None:
-        df = add_technical_features(df)
-    else:
-        print("⚠️ No feature generator found — using raw columns only.")
-
-    # === Add Market Regime ===
-    if MarketRegimeDetector is not None:
+    if add_feats:
         try:
-            detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
-            regime_df = detector.detect_regime(df)
-            df = pd.merge(df, regime_df[["Date", "regime"]], on="Date", how="left")
-            print("✅ Market regime added.")
+            df = add_feats(df)
+            print("✅ Applied add_technical_features successfully.")
         except Exception as e:
-            print(f"⚠️ Regime detection failed: {e}")
+            print(f"⚠️ Feature generator error while applying: {e}")
+    else:
+        print("⚠️ No valid add_technical_features found — may cause missing features.")
+
+    # add regime if exists
+    if "regime" not in df.columns:
+        try:
+            from utils.market_regime_detector import MarketRegimeDetector
+            det = MarketRegimeDetector(ma_fast=20, ma_slow=50)
+            r = det.detect_regime(df)
+            if "regime" in r.columns:
+                df = pd.merge(df, r[["Date","regime"]], on="Date", how="left")
+                print("✅ Added regime from utils.")
+            else:
+                df["regime"] = "neutral"
+        except Exception:
             df["regime"] = "neutral"
-    else:
-        df["regime"] = "neutral"
 
-    # === Macro Features (defensive) ===
-    macro_cols = ["DXY", "CPI", "FEDFUNDS", "CRUDE_OIL", "VIX", "US10Y", "M2", "SP500", "NASDAQ", "DJIA"]
-    for col in macro_cols:
-        if col in df.columns:
-            df[f"{col}_change"] = df[col].pct_change()
-            df[f"{col}_lag_3"] = df[col].shift(3)
-            df[f"{col}_lag_5"] = df[col].shift(5)
+    # load model
+    model_meta = load_latest_model(model_dir)
+    model_obj = model_meta.get("calibrated_model") or model_meta.get("raw_ensemble") or model_meta.get("model")
 
-    # === Load model ===
-    model = load_latest_model(MODEL_DIR)
+    # prepare feature matrix: keep numeric columns (exclude date, target cols)
+    exclude = {"Date","target_bin","target_ret","future_ret","regime"}
+    feats = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
+    X = df[feats].copy().fillna(0.0)
+    X = safe_feature_align(X, model_meta)
 
-    # === Feature alignment ===
-    exclude = {"Date", "target_bin", "target_multi", "target_ret", "future_ret", "regime"}
-    feature_cols = [c for c in df.columns if c not in exclude and pd.api.types.is_numeric_dtype(df[c])]
-    X = df[feature_cols].copy().fillna(df[feature_cols].median())
-
-    model_feats = getattr(model, "feature_names_in_", None)
-    if model_feats is not None:
-        missing = [f for f in model_feats if f not in X.columns]
-        if missing:
-            print(f"⚠️ Adding missing columns (set=0): {missing}")
-            for f in missing:
-                X[f] = 0
-        X = X[model_feats]
-
-    # === Predict signals ===
-    preds = model.predict(X)
-
-    df["buy_prob"] = np.nan
-    if hasattr(model, "predict_proba"):
-        probs = model.predict_proba(X)
-        buy_prob = probs[:, -1] if probs.shape[1] > 1 else probs[:, 0]
+    # try predict proba
+    probs = model_predict_proba(model_obj, X)
+    if probs is not None:
+        # if binary, probs.shape[1]==2 expected
+        if probs.ndim == 2 and probs.shape[1] > 1:
+            buy_prob = probs[:, -1]
+            sell_prob = probs[:, 0]
+        else:
+            buy_prob = probs.ravel()
+            sell_prob = 1.0 - buy_prob
         df["buy_prob"] = buy_prob
-        THRESHOLD_BUY, THRESHOLD_SELL = 0.6, 0.4
-        filtered_signal = np.zeros(len(df))
-        filtered_signal = np.where(buy_prob > THRESHOLD_BUY, 1, filtered_signal)
-        filtered_signal = np.where(buy_prob < THRESHOLD_SELL, -1, filtered_signal)
-        df["signal_filtered"] = filtered_signal
-        print(f"⚙️ Signal filtering applied (buy>{THRESHOLD_BUY}, sell<{THRESHOLD_SELL})")
+        df["sell_prob"] = sell_prob
+        saved_thr = model_meta.get("threshold") if isinstance(model_meta, dict) else None
+        buy_thr = float(saved_thr) if (saved_thr is not None and saved_thr>0) else BUY_PROB_DEFAULT
+        sell_thr = buy_thr - 0.12
+        print(f"Using buy_thr={buy_thr:.3f}, sell_thr={sell_thr:.3f}")
     else:
-        df["signal_filtered"] = np.nan
-        print("ℹ️ Model has no predict_proba; skipping filtering.")
+        print("Model has no predict_proba -> using predict fallback")
+        preds = model_obj.predict(X)
+        df["buy_prob"] = np.where(preds==1, 0.75, 0.25)
+        df["sell_prob"] = 1.0 - df["buy_prob"]
+        buy_thr, sell_thr = BUY_PROB_DEFAULT, SELL_PROB_DEFAULT
 
-    # === Final Signal ===
-    if np.unique(preds).max() > 1:
-        base_signal = np.where(preds == 2, 1, np.where(preds == 0, -1, 0))
-    else:
-        base_signal = np.where(preds == 1, 1, -1)
+    # prepare volatility cutoff (dynamic)
+    vol_cutoff = df["vol_24h"].quantile(VOL_THRESHOLD_PCTL)
+    print(f"Volatility cutoff (p{int(VOL_THRESHOLD_PCTL*100)}): {vol_cutoff:.6f}")
 
-    combined = base_signal.copy()
-    if "signal_filtered" in df.columns:
-        filt = df["signal_filtered"].fillna(0).astype(int).values
-        mask = filt != 0
-        combined[mask] = filt[mask]
-    df["signal"] = combined
+    # simulation state
+    equity = initial_capital
+    equities = []
+    position = 0.0         # +units for long, -units for short
+    entry_price = 0.0
+    entry_atr = 0.0
+    entry_value = 0.0
+    trade_log = []
 
-    # === Compute basic returns ===
-    df["strategy_ret"] = df["signal"].shift(1).fillna(0) * df["Return"]
-
-    # === Regime-aware weighting ===
-    weights = {"bull": 1.0, "neutral": 0.4, "bear": -0.5}
-    df["position_weight"] = df["regime"].map(weights).fillna(0.4)
-    df["weighted_ret"] = df["strategy_ret"] * df["position_weight"]
-
-    # === Regime-aware Stop-loss ===
-    STOP_LOSS_LEVELS = {"bull": -0.05, "neutral": -0.02, "bear": -0.015}
-    DRAWDOWN_LIMIT = -0.15
-
-    equity = [INITIAL_CAPITAL]
-    current_equity = INITIAL_CAPITAL
-    triggered_stop = False
-    triggered_dd = False
-
+    # iterate bars: use previous period signal to enter next bar
     for i in range(1, len(df)):
-        ret = df.loc[i, "weighted_ret"]
-        current_equity *= (1 + ret)
-        equity.append(current_equity)
+        date = df.loc[i, "Date"]
+        price = float(df.loc[i, "Close"])
+        prev_buy_prob = float(df.loc[i-1, "buy_prob"])
+        prev_sell_prob = float(df.loc[i-1, "sell_prob"]) if "sell_prob" in df.columns else (1.0 - prev_buy_prob)
+        regime = df.loc[i, "regime"] if "regime" in df.columns else "neutral"
+        vol_now = float(df.loc[i, "vol_24h"])
+        atr_now = float(df.loc[i, "ATR"] if "ATR" in df.columns else 0.0)
 
-        regime = df.loc[i, "regime"]
-        stop_loss = STOP_LOSS_LEVELS.get(regime, -0.03)
+        # compute "confidence" from probability: map [0.5,1] -> [0,1]; negative side ignored for longs
+        conf_long_raw = max(0.0, (prev_buy_prob - 0.5) * 2.0)  # 0..1
+        conf_short_raw = max(0.0, (prev_sell_prob - 0.5) * 2.0)
+        # final confidence depends on which side we consider later
+        vol_block = vol_now > vol_cutoff
+        rweight = REGIME_WEIGHTS.get(regime, 0.9)
 
-        if ret < stop_loss and not triggered_stop:
-            print(f"🛑 Stop loss ({stop_loss:.1%}) triggered at {df.loc[i, 'Date'].date()} ({regime})")
-            df.loc[i:, "signal"] = 0
-            df.loc[i:, "weighted_ret"] = 0
-            triggered_stop = True
-            equity.extend([current_equity] * (len(df) - len(equity)))
-            break
+        # decide wants
+        want_long = (prev_buy_prob >= buy_thr) and (prev_buy_prob >= MIN_PROBA_FOR_SIGNAL) and (conf_long_raw >= MIN_CONFIDENCE) and (not vol_block) and (rweight>0)
+        want_short = ENABLE_SHORTS and (prev_sell_prob >= (1.0 - buy_thr + 0.0)) and (prev_sell_prob >= MIN_PROBA_FOR_SIGNAL) and (conf_short_raw >= MIN_CONFIDENCE) and (not vol_block) and (rweight>0)
 
-        max_eq = max(equity)
-        drawdown = (current_equity / max_eq) - 1
-        if drawdown < DRAWDOWN_LIMIT and not triggered_dd:
-            print(f"⚠️ Drawdown limit reached ({drawdown:.1%}) at {df.loc[i, 'Date'].date()} → Exit.")
-            df.loc[i:, "signal"] = 0
-            df.loc[i:, "weighted_ret"] = 0
-            triggered_dd = True
-            equity.extend([current_equity] * (len(df) - len(equity)))
-            break
+        # compute stop/tp distances
+        stop_distance_long = max(atr_now * ATR_MULTIPLIER_SL, price * MIN_STOP_PCT)
+        tp_distance_long = max(atr_now * ATR_MULTIPLIER_TP, price * MIN_STOP_PCT * 2)
+        stop_distance_short = stop_distance_long
+        tp_distance_short = tp_distance_long
 
-    if len(equity) < len(df):
-        equity.extend([equity[-1]] * (len(df) - len(equity)))
+        # ENTRY: flat -> try enter long or short (prioritize side with stronger confidence)
+        if position == 0:
+            # decide side priority
+            if want_long or want_short:
+                # compare confidences to pick side (if both true)
+                if want_long and want_short:
+                    # choose larger raw confidence
+                    chosen_side = "long" if conf_long_raw >= conf_short_raw else "short"
+                elif want_long:
+                    chosen_side = "long"
+                else:
+                    chosen_side = "short"
 
-    df["equity"] = equity[:len(df)]
-    df["strategy_ret"] = df["weighted_ret"]
+                if chosen_side == "long" and want_long:
+                    confidence = conf_long_raw
+                    # position sizing: risk_amount = equity * RISK_PER_TRADE_FRAC * (0.5 + 0.5*confidence) * rweight
+                    risk_amount = equity * RISK_PER_TRADE_FRAC * (0.5 + 0.5*confidence) * rweight
+                    if stop_distance_long <= 1e-8:
+                        stop_distance_long = price * 0.002
+                    units = max(0.0, risk_amount / stop_distance_long)
+                    max_invest = equity * MAX_POSITION_FRAC * rweight
+                    invest = min(units * price, max_invest)
+                    if invest > 0:
+                        units = invest / price
+                        entry_price = price * (1.0 + SLIPPAGE)
+                        fee_entry = invest * COMMISSION
+                        entry_time = date
+                        position = units
+                        entry_atr = atr_now
+                        entry_value = units * entry_price
+                        equity -= fee_entry
+                        trade_log.append({
+                            "side": "long",
+                            "entry_idx": i, "entry_date": entry_time, "entry_price": entry_price,
+                            "units": units, "invest": invest, "fee_entry": fee_entry, "confidence": confidence,
+                            "regime": regime, "stop_distance": stop_distance_long, "tp_distance": tp_distance_long
+                        })
+                elif chosen_side == "short" and want_short:
+                    confidence = conf_short_raw
+                    risk_amount = equity * RISK_PER_TRADE_FRAC * (0.5 + 0.5*confidence) * rweight
+                    if stop_distance_short <= 1e-8:
+                        stop_distance_short = price * 0.002
+                    units = max(0.0, risk_amount / stop_distance_short)
+                    max_invest = equity * MAX_POSITION_FRAC * rweight
+                    invest = min(units * price, max_invest)
+                    if invest > 0:
+                        units = invest / price
+                        entry_price = price * (1.0 - SLIPPAGE)  # short entry at slightly lower
+                        fee_entry = invest * COMMISSION
+                        entry_time = date
+                        position = -units  # negative units indicates short
+                        entry_atr = atr_now
+                        entry_value = units * entry_price
+                        equity -= fee_entry
+                        trade_log.append({
+                            "side": "short",
+                            "entry_idx": i, "entry_date": entry_time, "entry_price": entry_price,
+                            "units": units, "invest": invest, "fee_entry": fee_entry, "confidence": confidence,
+                            "regime": regime, "stop_distance": stop_distance_short, "tp_distance": tp_distance_short
+                        })
 
-    # === Save results ===
-    metrics = compute_metrics(df)
-    print("\n===== Trading Simulation Summary =====")
-    for k, v in metrics.items():
-        print(f"{k:<20s}: {v:.3f}" if isinstance(v, float) else f"{k:<20s}: {v}")
-    print("======================================")
+        # If in position: evaluate exit conditions (both long and short)
+        if position != 0:
+            last_trade = trade_log[-1]
+            # mark to market (account for exit slippage)
+            if position > 0:
+                # long
+                mark_price = price * (1.0 - SLIPPAGE)
+                current_value = position * mark_price
+                invested = last_trade["invest"]
+                # check stop
+                if mark_price <= (last_trade["entry_price"] - last_trade["stop_distance"]):
+                    exit_price = mark_price
+                    fee_exit = current_value * COMMISSION
+                    pnl = (current_value - (position * last_trade["entry_price"])) - fee_exit
+                    equity += pnl
+                    last_trade.update({
+                        "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                        "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "stop"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                elif mark_price >= (last_trade["entry_price"] + last_trade["tp_distance"]):
+                    exit_price = mark_price
+                    fee_exit = current_value * COMMISSION
+                    pnl = (current_value - (position * last_trade["entry_price"])) - fee_exit
+                    equity += pnl
+                    last_trade.update({
+                        "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                        "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "takeprofit"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                else:
+                    # signal-based exit (use current prob)
+                    current_prob = float(df.loc[i, "buy_prob"])
+                    if current_prob <= (buy_thr - 0.10):
+                        exit_price = mark_price
+                        fee_exit = current_value * COMMISSION
+                        pnl = (current_value - (position * last_trade["entry_price"])) - fee_exit
+                        equity += pnl
+                        last_trade.update({
+                            "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                            "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "signal_exit"
+                        })
+                        position = 0.0
+                        entry_price = 0.0
+            else:
+                # short (position < 0)
+                units = abs(position)
+                mark_price = price * (1.0 + SLIPPAGE)
+                current_value = units * mark_price
+                invested = last_trade["invest"]
+                # for short, stop is when price rises above entry + stop_distance
+                if mark_price >= (last_trade["entry_price"] + last_trade["stop_distance"]):
+                    exit_price = mark_price
+                    fee_exit = current_value * COMMISSION
+                    pnl = ( (last_trade["entry_price"] * units) - current_value ) - fee_exit
+                    equity += pnl
+                    last_trade.update({
+                        "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                        "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "stop"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                elif mark_price <= (last_trade["entry_price"] - last_trade["tp_distance"]):
+                    exit_price = mark_price
+                    fee_exit = current_value * COMMISSION
+                    pnl = ( (last_trade["entry_price"] * units) - current_value ) - fee_exit
+                    equity += pnl
+                    last_trade.update({
+                        "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                        "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "takeprofit"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                else:
+                    # signal-based exit for short (use current sell_prob)
+                    current_sell_prob = float(df.loc[i, "sell_prob"]) if "sell_prob" in df.columns else (1.0 - float(df.loc[i, "buy_prob"]))
+                    if current_sell_prob <= (1.0 - buy_thr - 0.10):
+                        exit_price = mark_price
+                        fee_exit = current_value * COMMISSION
+                        pnl = ( (last_trade["entry_price"] * units) - current_value ) - fee_exit
+                        equity += pnl
+                        last_trade.update({
+                            "exit_idx": i, "exit_date": date, "exit_price": exit_price,
+                            "fee_exit": fee_exit, "pnl": pnl, "return": pnl / invested if invested>0 else None, "exit_reason": "signal_exit"
+                        })
+                        position = 0.0
+                        entry_price = 0.0
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    csv_path = os.path.join(SAVE_DIR, f"backtest_regime_{timestamp}.csv")
-    df.to_csv(csv_path, index=False)
-    print(f"💾 Saved trade log: {csv_path}")
+        # record equity this bar (mark to market)
+        if position > 0:
+            mark_price = price * (1.0 - SLIPPAGE)
+            equities.append(equity + position * mark_price)
+        elif position < 0:
+            units = abs(position)
+            mark_price = price * (1.0 + SLIPPAGE)
+            # short current P&L: entry*units - current_value
+            equities.append(equity + (last_trade["entry_price"] * units) - (units * mark_price))
+        else:
+            equities.append(equity)
 
-    if PLOT:
-        chart_path = os.path.join(SAVE_DIR, f"equity_curve_regime_{timestamp}.png")
-        visualize_equity(df, chart_path)
+    # finalize DataFrame alignment
+    if len(equities) < len(df):
+        equities += [equities[-1]] * (len(df) - len(equities))
+    df = df.iloc[:len(equities)].copy().reset_index(drop=True)
+    df["equity"] = equities
+    df["strategy_ret"] = df["equity"].pct_change().fillna(0.0)
 
+    # metrics
+    if len(df) >= 2:
+        delta_days = (df.loc[1,"Date"] - df.loc[0,"Date"]).total_seconds() / (3600*24)
+        freq = int(round(365.0 / delta_days)) if delta_days>0 else 24*252
+    else:
+        freq = 24*252
+    metrics = compute_backtest_metrics(df["equity"], df["strategy_ret"], freq_per_year=freq)
+
+    # save logs
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trades_df = pd.DataFrame(trade_log)
+    trades_path = os.path.join(save_dir, f"trades_profitboost_v6_1_{ts}.csv")
+    trades_df.to_csv(trades_path, index=False)
+    df_path = os.path.join(save_dir, f"backtest_profitboost_v6_1_{ts}.csv")
+    df.to_csv(df_path, index=False)
+    chart_path = os.path.join(save_dir, f"equity_profitboost_v6_1_{ts}.png")
+    visualize_equity(df["Date"], df["equity"], chart_path, "Profit-Boost v6.1 Equity Curve")
+
+    # print metrics
+    print("\n===== BACKTEST METRICS (v6.1) =====")
+    for k,v in metrics.items():
+        if isinstance(v, float):
+            print(f"{k:25s}: {v:.6f}")
+        else:
+            print(f"{k:25s}: {v}")
+    print(f"Trades saved → {trades_path}")
+    print(f"Backtest CSV → {df_path}")
+    print(f"Chart → {chart_path}")
+
+    return {"metrics":metrics, "trades_path":trades_path, "df_path":df_path, "chart_path":chart_path}
 
 if __name__ == "__main__":
-    simulate_trading()
+    simulate_backtest()
+    print("Done.")
