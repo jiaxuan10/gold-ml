@@ -25,7 +25,7 @@ import schedule
 # =========================================================
 # --- CONFIG ---
 # =========================================================
-MODEL_PATH = "models/run_20251029_123456/ensemble_calibrated_20251029_123456.pkl"  # ⚠️ 修改成你自己的路径
+MODEL_PATH = "models/run_20251029_231844/ensemble_calibrated_20251029_231844.pkl"  # ⚠️ 修改成你自己的路径
 INITIAL_CAPITAL = 10000
 HISTORY_HOURS = 500
 TRADE_LOG_PATH = "backtest_results/real_time_trades.csv"

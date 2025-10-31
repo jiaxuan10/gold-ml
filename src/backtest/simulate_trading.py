@@ -39,39 +39,39 @@ INITIAL_CAPITAL = 10000.0
 
 # === 更激进的风险/头寸设置（v6.3 aggressive-style） ===
 # Risk sizing (base) — 提升每笔风险敞口
-BASE_RISK_PER_TRADE_FRAC = 0.08   # 从 0.05 提升到 0.08（8% 的资金风险）
-MAX_POSITION_FRAC = 0.75          # 单笔头寸最大占比从 0.50 提升至 0.75
+BASE_RISK_PER_TRADE_FRAC = 0.25   # 从 0.05 提升到 0.08（8% 的资金风险）
+MAX_POSITION_FRAC = 1.0          # 单笔头寸最大占比从 0.50 提升至 0.75
 
 # Short-specific multiplier -> 与多头同等或略保守
 SHORT_RISK_MULT = 1.0             # 不再降低空头仓位（与多头等同）
 
 # ATR / stop / tp 调整：放宽止损、拉远止盈以提升RR
 ATR_WINDOW = 14
-ATR_MULTIPLIER_SL = 1.6     # 从 1.8 下调到 1.6（略宽止损，减少被震出）
-ATR_MULTIPLIER_TP = 4.0     # 从 3.2 提高到 4.0（放大获利空间）
+ATR_MULTIPLIER_SL = 1.2    # 从 1.8 下调到 1.6（略宽止损，减少被震出）
+ATR_MULTIPLIER_TP = 6.0     # 从 3.2 提高到 4.0（放大获利空间）
 MIN_STOP_PCT = 0.001        # 最低止损（保留）
 
 # Volatility filter：放宽高波动过滤，允许更多高波动交易
 VOL_WINDOW = 24
-VOL_THRESHOLD_PCTL = 0.95   # 从 0.90 放宽到 0.95
+VOL_THRESHOLD_PCTL = 0.995   # 从 0.90 放宽到 0.95
 
 # Model thresholds & fallback：放宽阈值以提升交易频率
 BUY_PROB_DEFAULT = 0.50
-MIN_CONFIDENCE = 0.25        # 从 0.35 放宽到 0.25（允许较低置信也进场）
-MIN_PROBA_FOR_SIGNAL = 0.48  # 下限从 0.50 调为 0.48，略放宽
+MIN_CONFIDENCE = 0.10       # 从 0.35 放宽到 0.25（允许较低置信也进场）
+MIN_PROBA_FOR_SIGNAL = 0.47  # 下限从 0.50 调为 0.48，略放宽
 
 # Costs
 COMMISSION = 0.0005  # proportional
 SLIPPAGE = 0.0005
 
-REGIME_WEIGHTS = {"bull": 1.0, "neutral": 1.0, "bear": 0.9}  # 略调 regime 权重：中性提高
+REGIME_WEIGHTS = {"bull": 1.2, "neutral": 1.0, "bear": 0.9} # 略调 regime 权重：中性提高
 
 # Enable shorting
 ENABLE_SHORTS = True
 
 # Drawdown-based dynamic risk scaling -> 保持阈值，但我们将在回测中禁用（固定 dd_factor=1.0）
-DD_SCALE_THRESHOLDS = [0.10, 0.20, 0.30]
-DD_SCALE_FACTORS = [0.9, 0.7, 0.5]
+DD_SCALE_THRESHOLDS = [0.20, 0.35, 0.50]
+DD_SCALE_FACTORS = [0.95, 0.8, 0.6]
 # ===================================================
 
 
