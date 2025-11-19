@@ -1,7 +1,10 @@
-yfinance
-pandas
+streamlit>=1.20
+pandas>=1.5
 numpy
-ta
-streamlit
+yfinance
 plotly
 scikit-learn
+xgboost
+joblib
+pytz
+streamlit-autorefresh

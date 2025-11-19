@@ -1,87 +1,116 @@
 import pandas as pd
 import numpy as np
-
 from utils.market_regime_detector import MarketRegimeDetector
 
-
-
-# ---------- FEATURE CREATION ----------
 def add_technical_features(df):
+    """
+    Unified Feature Engineering.
+    Expects: df with 'GOLD_Close' (or 'Close').
+    Outputs: df with Capitalized Feature names (SMA_20, RSI_14) to match your CSV.
+    """
     df = df.copy()
-    for col in ["Close","Open","High","Low"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    close = df["Close"]
+    
+    # 1. Standardize Input Columns (Handle GOLD_ prefix)
+    # We map GOLD_Close to a temporary 'close' variable for calculation
+    if "GOLD_Close" in df.columns:
+        close = df["GOLD_Close"]
+        high = df["GOLD_High"]
+        low = df["GOLD_Low"]
+    elif "Close" in df.columns:
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+    else:
+        raise ValueError("❌ dataframe missing 'GOLD_Close' or 'Close' column")
 
-    # moving averages
-    df["sma_5"] = close.rolling(5).mean()
-    df["sma_10"] = close.rolling(10).mean()
-    df["sma_20"] = close.rolling(20).mean()
-    df["ema_12"] = close.ewm(span=12, adjust=False).mean()
-    df["ema_26"] = close.ewm(span=26, adjust=False).mean()
+    # Ensure numeric
+    close = pd.to_numeric(close, errors='coerce')
+    high = pd.to_numeric(high, errors='coerce')
+    low = pd.to_numeric(low, errors='coerce')
 
-    # volatility & momentum
-    df["vol_5"] = close.pct_change().rolling(5).std()
-    df["mom_3"] = close.pct_change(3)
-    df["mom_5"] = close.pct_change(5)
-
-    # Bollinger band position (normalized)
-    bb_mid = close.rolling(20).mean()
-    bb_std = close.rolling(20).std()
-    # avoid division by zero
-    df["bb_pos"] = (close - (bb_mid - 2*bb_std)) / (4*bb_std.replace(0, np.nan))
-
-    # RSI
-    delta = close.diff()
-    gain = delta.where(delta>0, 0).rolling(14).mean()
-    loss = (-delta.where(delta<0, 0)).rolling(14).mean()
-    rs = gain / (loss.replace(0, np.nan))
-    df["rsi"] = 100 - (100 / (1 + rs))
+    # --- 2. Overwrite/Create Features (Use CAPITAL names to match CSV) ---
+    
+    # Moving Averages
+    df["SMA_20"] = close.rolling(20, min_periods=5).mean()
+    df["SMA_50"] = close.rolling(50, min_periods=10).mean()
+    df["EMA_12"] = close.ewm(span=12, adjust=False).mean()
+    df["EMA_26"] = close.ewm(span=26, adjust=False).mean()
 
     # MACD
-    macd = df["ema_12"] - df["ema_26"]
-    signal = macd.ewm(span=9, adjust=False).mean()
-    df["macd"] = macd
-    df["macd_signal"] = signal
-    df["macd_hist"] = macd - signal
+    df["MACD"] = df["EMA_12"] - df["EMA_26"]
+    df["Signal_Line"] = df["MACD"].ewm(span=9, adjust=False).mean()
 
-    # Price ratios (scalper style) and 24h correlation if available
-    for col in [c for c in df.columns if ("DX" in c or "SP" in c or "BTC" in c)]:
-        # guard division
-        df[f"Gold_{col}_Ratio"] = df["Close"] / df[col].replace(0, np.nan)
-        df[f"Corr_{col}_24h"] = df["Close"].rolling(24).corr(df[col])
+    # RSI (14)
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14, min_periods=3).mean()
+    loss = (-delta.clip(upper=0)).rolling(14, min_periods=3).mean()
+    rs = gain / (loss.replace(0, np.nan))
+    df["RSI_14"] = 100 - (100 / (1 + rs))
 
-    # lag features (common in time series)
-    for lag in [1,2,3,6,12]:
-        df[f"ret_lag_{lag}"] = df["Close"].pct_change(lag)
+    # ATR (14)
+    hl = high - low
+    hc = (high - close.shift()).abs()
+    lc = (low - close.shift()).abs()
+    tr = np.maximum.reduce([hl, hc, lc])
+    df["ATR_14"] = pd.Series(tr).rolling(14, min_periods=3).mean()
 
-    # ma differences
-    df["ma5_ma20"] = df["sma_5"] - df["sma_20"]
-    # --- Structural / volatility ratio features ---
-    df["high_break"] = (df["Close"] > df["High"].rolling(24).max()).astype(int)
-    df["low_break"] = (df["Close"] < df["Low"].rolling(24).min()).astype(int)
-    df["vol_ratio"] = df["vol_5"] / df["vol_5"].rolling(20).mean()
-    df["ret_accel"] = df["Close"].pct_change() - df["Close"].pct_change(2)
-    df["rsi_macd_interact"] = df["rsi"] * df["macd"]
+    # Volatility & Momentum
+    df["Return"] = close.pct_change()
+    df["Volatility_20"] = df["Return"].rolling(20, min_periods=5).std()
+    df["Momentum_10"] = close.pct_change(10)
 
+    # Cross-Asset Ratios (Safe Logic)
+    # Check for external assets in columns (e.g. DX-Y.NYB)
+    for col in df.columns:
+        if col in ["DX-Y.NYB", "BTC-USD", "^GSPC", "^IXIC"]:
+            # Create Ratio and Correlation
+            df[f"Gold_{col}_Ratio"] = close / (pd.to_numeric(df[col], errors='coerce') + 1e-9)
+            df[f"Corr_{col}_24h"] = close.rolling(24).corr(pd.to_numeric(df[col], errors='coerce'))
+
+    # Advanced Features
+    df["Lag_Return_1h"] = df["Return"].shift(1)
+    df["Lag_Return_6h"] = df["Return"].shift(6)
+    df["MA_diff"] = df["SMA_20"] - df["SMA_50"]
+
+    # Z-Score
+    rolling_mean = close.rolling(24).mean()
+    rolling_std = close.rolling(24).std()
+    df["Rolling_Zscore_24h"] = (close - rolling_mean) / (rolling_std + 1e-9)
+    
+    # Fill NaNs for training stability
+    df = df.replace([np.inf, -np.inf], np.nan)
+    
     return df
 
-
-def prepare_target(df, horizon=5, threshold= 0.0005):
+def prepare_target(df, horizon=5, threshold=0.0005):
+    """
+    Creates target labels. 
+    Note: We check for GOLD_Close or Close again to be safe.
+    """
     df = df.copy()
-    df["target_ret"] = (df["Close"].shift(-horizon) / df["Close"] - 1)
-    # thresholded label: ignore small moves -> NaN
+    if "GOLD_Close" in df.columns:
+        close = pd.to_numeric(df["GOLD_Close"], errors='coerce')
+    else:
+        close = pd.to_numeric(df["Close"], errors='coerce')
+        
+    # Create future return target
+    df["target_ret"] = (close.shift(-horizon) / close - 1)
+    
+    # Label: 1 = Up, 0 = Down, NaN = Flat
     df["target_bin"] = np.where(df["target_ret"] > threshold, 1,
                                 np.where(df["target_ret"] < -threshold, 0, np.nan))
     return df
 
-
 def detect_market_regime(df):
     detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
-    regime_df = detector.detect_regime(df)
-    # merge on Date (assumes detector returns Date)
-    df = pd.merge(df, regime_df[["Date", "regime"]], on="Date", how="left")
+    # Ensure detector uses correct column names if it relies on them
+    # If MarketRegimeDetector expects "Close", we might need to rename temporarily
+    temp_df = df.copy()
+    if "GOLD_Close" in temp_df.columns and "Close" not in temp_df.columns:
+        temp_df = temp_df.rename(columns={"GOLD_Close": "Close"})
+        
+    regime_df = detector.detect_regime(temp_df)
+    
+    if "regime" not in df.columns:
+        df = pd.merge(df, regime_df[["Date", "regime"]], on="Date", how="left")
     return df
-
-
-
