@@ -50,9 +50,7 @@ st_autorefresh(interval=refresh_rate * 1000, key="datarefresh")
 def load_data():
     if not os.path.exists(LATEST_CSV): return pd.DataFrame()
     df = pd.read_csv(LATEST_CSV)
-    df["Date"] = pd.to_datetime(df["Date"])
-    # Convert to KL Time
-    df["Date"] = df["Date"].dt.tz_convert("Asia/Kuala_Lumpur")
+    df["Date"] = pd.to_datetime(df["Date"], utc=True) # 强制 UTC
     return df.sort_values("Date")
 
 def load_json(path):
@@ -64,14 +62,12 @@ def load_json(path):
 
 def load_trades():
     if os.path.exists(TRADE_LOG):
-        df = pd.read_csv(TRADE_LOG)
-        df["Date"] = pd.to_datetime(df["Date"])
-        # Fix timezones if mixed
-        if df["Date"].dt.tz is None:
-             df["Date"] = df["Date"].dt.tz_localize("UTC").dt.tz_convert("Asia/Kuala_Lumpur")
-        else:
-             df["Date"] = df["Date"].dt.tz_convert("Asia/Kuala_Lumpur")
-        return df
+        try:
+            df = pd.read_csv(TRADE_LOG)
+            df["Date"] = pd.to_datetime(df["Date"], utc=True) # 强制 UTC
+            return df
+        except Exception:
+            pass
     return pd.DataFrame()
 
 # --- LOAD ASSETS ---
@@ -142,16 +138,20 @@ if not trades.empty:
 # Probability Heatmap (Bottom Chart)
 # Use prediction log for history
 if os.path.exists(PRED_LOG):
-    pred_hist = pd.read_csv(PRED_LOG)
-    pred_hist["Date"] = pd.to_datetime(pred_hist["Date"]).dt.tz_convert("Asia/Kuala_Lumpur")
-    # Align with df dates
-    merged = pd.merge_asof(df[["Date"]], pred_hist.sort_values("Date"), on="Date")
-    
-    fig.add_trace(go.Scatter(x=merged["Date"], y=merged["probability"], 
-                             fill='tozeroy', line=dict(color='#00ccff', width=1), name="AI Buy Prob"), row=2, col=1)
-    # Threshold line
-    fig.add_hline(y=pred.get("threshold", 0.5), line_dash="dot", row=2, col=1, annotation_text="Threshold")
-
+    try:
+        pred_hist = pd.read_csv(PRED_LOG)
+        # 统一转为 UTC
+        pred_hist["Date"] = pd.to_datetime(pred_hist["Date"], utc=True)
+        
+        # Align with df dates
+        merged = pd.merge_asof(df[["Date"]], pred_hist.sort_values("Date"), on="Date")
+        
+        fig.add_trace(go.Scatter(x=merged["Date"], y=merged["probability"], 
+                                 fill='tozeroy', line=dict(color='#00ccff', width=1), name="AI Buy Prob"), row=2, col=1)
+        # Threshold line
+        fig.add_hline(y=pred.get("threshold", 0.5), line_dash="dot", row=2, col=1, annotation_text="Threshold")
+    except Exception:
+        pass
 fig.update_layout(height=600, margin=dict(l=0, r=0, t=0, b=0), template="plotly_dark")
 fig.update_yaxes(range=[0, 1], row=2, col=1)
 st.plotly_chart(fig, use_container_width=True)

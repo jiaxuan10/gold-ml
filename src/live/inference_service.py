@@ -8,7 +8,12 @@ import pickle
 import json
 import pandas as pd
 import numpy as np
-from datetime import datetime
+import warnings
+from datetime import datetime, timezone
+
+# Suppress warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
 
 # ====== CONFIG PATHS ======
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -30,7 +35,6 @@ TRAILING_ATR_MULT = 1.2
 
 # ====== IMPORTS ======
 sys.path.append(os.path.join(ROOT, "src"))
-# We need your regime detector to match the strategy logic
 from utils.market_regime_detector import MarketRegimeDetector
 
 # ====== STATE MANAGEMENT ======
@@ -48,7 +52,12 @@ def load_portfolio():
     try:
         with open(PORTFOLIO_STATE, "r") as f:
             data = f.read().strip()
-            return json.loads(data) if data else default
+            if not data: return default
+            loaded = json.loads(data)
+            # Robustness: Ensure all keys exist
+            for k, v in default.items():
+                if k not in loaded: loaded[k] = v
+            return loaded
     except:
         return default
 
@@ -89,19 +98,22 @@ while True:
             time.sleep(5)
             continue
 
-        # 1. Load Data & Calculate Strategy Specifics
+        # 1. Load Data
         try:
             df = pd.read_csv(LATEST_CSV)
         except:
             time.sleep(1)
             continue
 
-        # Re-calculate specific strategy indicators that might not be in the CSV
-        # Your strategy uses SMA_60, but feature_engineering usually does SMA_50. 
-        # Let's calculate it live to be safe.
+        # Standardize Columns
+        rename_map = {"GOLD_Close": "Close", "GOLD_Open": "Open", "GOLD_High": "High", "GOLD_Low": "Low"}
+        for gold_col, std_col in rename_map.items():
+            if gold_col in df.columns: df[std_col] = df[gold_col]
+
+        # Recalculate Live Indicators for Strategy
         price_col = "GOLD_Close" if "GOLD_Close" in df.columns else "Close"
         df["SMA_20_Live"] = df[price_col].rolling(20).mean()
-        df["SMA_60_Live"] = df[price_col].rolling(60).mean() # Strategy v6.6 Requirement
+        df["SMA_60_Live"] = df[price_col].rolling(60).mean() 
         
         # Regime Detection
         detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
@@ -117,43 +129,57 @@ while True:
         last_processed_time = latest_time
         print(f"\n🔎 Analyzing Candle: {latest_time}")
 
-        # 2. Prepare Model Input (Align 35 Features)
-        input_df = pd.DataFrame(columns=feature_cols)
-        input_df.loc[0] = 0.0
+        # 2. Prepare Model Input
+        input_df = pd.DataFrame(0.0, index=[0], columns=feature_cols)
         for col in feature_cols:
-            if col in latest_row: input_df.loc[0, col] = latest_row[col]
-
+            if col in latest_row:
+                 val = latest_row[col]
+                 if pd.notna(val) and not np.isinf(val):
+                     input_df.loc[0, col] = float(val)
+                 else:
+                     if len(df) > 1:
+                         prev_val = df.iloc[-2].get(col, 0.0)
+                         if pd.notna(prev_val): input_df.loc[0, col] = float(prev_val)
+        input_df = input_df.fillna(0.0)
+        
         # 3. Predict
-        prob = calib_model.predict_proba(input_df)[0, 1]
+        prob = calib_model.predict_proba(input_df.values)[0, 1]
         model_signal = 1 if prob > optimal_threshold else 0
 
-        # 4. Strategy Conditions (Ported from v6.6)
+        # 4. Strategy Conditions
         price = float(latest_row[price_col])
         atr = float(latest_row.get("ATR_14", 2.0))
         vol_now = float(latest_row.get("Volatility_20", 0.0))
         
-        # A. Momentum Check (SMA 20 > 60)
+        # Momentum Check
         sma20 = df["SMA_20_Live"].iloc[-1]
         sma60 = df["SMA_60_Live"].iloc[-1]
-        momentum_ok = sma20 > sma60
+        if pd.isna(sma20) or pd.isna(sma60): momentum_ok = True
+        else: momentum_ok = sma20 > sma60
         
-        # B. Volatility Filter (99.5% Quantile of loaded history)
+        # Volatility Check
         vol_cutoff = df["Volatility_20"].quantile(VOL_THRESHOLD_PCTL)
+        if pd.isna(vol_cutoff): vol_cutoff = 100.0
         vol_ok = vol_now <= vol_cutoff
         
-        # C. Regime Weight
-        current_regime = regime_df["regime"].iloc[-1]
+        # Regime Check
+        current_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
         regime_weight = REGIME_WEIGHTS.get(current_regime, 1.0)
 
-        # D. Final Decision
-        # "want_long" from your strategy
+        # Final Signal
         want_long = (model_signal == 1) and momentum_ok and vol_ok
         
-        # UI Status Update
+        # Update Status (UTC)
         status = {
-            "Date": latest_time, "probability": round(prob, 4), "threshold": round(optimal_threshold, 4),
-            "signal": 1 if want_long else 0, "price": price, "regime": current_regime,
-            "vol_ok": bool(vol_ok), "mom_ok": bool(momentum_ok)
+            "Date": str(latest_time), 
+            "probability": round(prob, 4), 
+            "threshold": round(optimal_threshold, 4),
+            "signal": 1 if want_long else 0, 
+            "price": price, 
+            "regime": current_regime,
+            "vol_ok": bool(vol_ok), 
+            "mom_ok": bool(momentum_ok),
+            "last_updated": datetime.now(timezone.utc).isoformat()
         }
         with open(PRED_JSON, "w") as f: json.dump(status, f)
         pd.DataFrame([status]).to_csv(PRED_LOG, mode='a', header=not os.path.exists(PRED_LOG), index=False)
@@ -162,9 +188,8 @@ while True:
         pos = portfolio["position"]
         bal = portfolio["balance"]
 
-        # --- EXIT LOGIC ---
+        # --- Exit Logic ---
         if pos > 0:
-            # SL Hit
             if price <= portfolio["sl"]:
                 pnl = (portfolio["sl"] - portfolio["entry_price"]) * pos
                 portfolio["balance"] += (portfolio["sl"] * pos)
@@ -172,7 +197,6 @@ while True:
                 log_trade(latest_time, "SELL", portfolio["sl"], pos, pnl, "Stop Loss")
                 print(f"🛑 SL Hit @ {portfolio['sl']:.2f}")
             
-            # Trailing Stop (if enabled)
             elif ENABLE_TRAILING and price <= portfolio["trail_stop"]:
                 pnl = (portfolio["trail_stop"] - portfolio["entry_price"]) * pos
                 portfolio["balance"] += (portfolio["trail_stop"] * pos)
@@ -180,7 +204,6 @@ while True:
                 log_trade(latest_time, "SELL", portfolio["trail_stop"], pos, pnl, "Trailing Stop")
                 print(f"🛑 Trail Hit @ {portfolio['trail_stop']:.2f}")
 
-            # Signal Flip (Strategy says: Exit if not want_long)
             elif not want_long: 
                 revenue = price * pos
                 pnl = (price - portfolio["entry_price"]) * pos
@@ -189,25 +212,18 @@ while True:
                 log_trade(latest_time, "SELL", price, pos, pnl, "Strategy Exit")
                 print(f"🔴 Strategy Exit @ {price:.2f} | PnL: {pnl:.2f}")
                 
-            # Update Trail (Mark-to-market)
             elif ENABLE_TRAILING:
                 new_trail = max(portfolio["trail_stop"], price - (atr * TRAILING_ATR_MULT))
                 portfolio["trail_stop"] = new_trail
 
-        # --- ENTRY LOGIC ---
+        # --- Entry Logic ---
         if want_long and pos == 0:
-            # 1. Volatility Scaling (From v6.6)
             median_vol = df["Volatility_20"].median()
+            if pd.isna(median_vol): median_vol = vol_now
+            
             vol_scale = np.clip((median_vol + 1e-9) / (vol_now + 1e-9), 0.5, 1.5)
-            
-            # 2. Stop Distance
             stop_dist = max(atr * ATR_SL_MULT, price * 0.0005)
-            
-            # 3. Risk Calculation
-            # formula: capital * 2% * regime_weight * vol_scale
             risk_amt = bal * BASE_RISK_PCT * regime_weight * vol_scale
-            
-            # 4. Position Size
             calc_units = risk_amt / stop_dist
             max_units = (bal * MAX_POS_FRAC) / price
             final_units = min(calc_units, max_units)
@@ -221,21 +237,21 @@ while True:
                 portfolio["tp"] = price + (atr * ATR_TP_MULT)
                 portfolio["trail_stop"] = price - (atr * TRAILING_ATR_MULT)
                 
-                reason = f"Conf:{prob:.2f}|Reg:{current_regime}|VolScale:{vol_scale:.2f}"
+                reason = f"Conf:{prob:.2f}|Reg:{current_regime}|Vol:{vol_scale:.2f}"
                 log_trade(latest_time, "BUY", price, final_units, 0, reason)
                 print(f"🟢 BUY @ {price:.2f} | Size: {final_units:.4f} | {reason}")
 
-        # Update Equity
-        unrealized = (price - portfolio["entry_price"]) * portfolio["position"] if portfolio["position"] > 0 else 0
-        portfolio["equity"] = portfolio["balance"] + unrealized
+        # --- Update Equity (FIXED) ---
+        # Equity = Cash + Market Value of Holdings
+        market_value = portfolio["position"] * price
+        portfolio["equity"] = portfolio["balance"] + market_value
+        
         save_portfolio(portfolio)
         
-        print(f"📊 Equity: ${portfolio['equity']:.2f} | Regime: {current_regime} | VolOK: {vol_ok}")
+        print(f"📊 Equity: ${portfolio['equity']:.2f} | Prob: {prob:.1%} | Regime: {current_regime}")
 
     except Exception as e:
         print(f"⚠️ Error: {e}")
-        import traceback
-        traceback.print_exc()
         time.sleep(5)
     
     time.sleep(5)

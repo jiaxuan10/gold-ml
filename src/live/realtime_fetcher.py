@@ -7,6 +7,9 @@ import sys
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta, timezone
+import warnings
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
 
 # Path Setup
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
