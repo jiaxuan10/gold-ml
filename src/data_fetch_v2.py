@@ -4,7 +4,7 @@ fetch_data_highfreq_final_v3.py
 -----------------------------------------------------
 ✅ Gold Scalper–style hourly data pipeline (stable)
 ✅ Auto fallback if 1h data unavailable (→ 1d)
-✅ Smart NaN handling & interpolation (no “0 rows”)
+✅ Smart NaN handling (no interpolation fabrication)
 ✅ Adds key technical & cross-asset features
 ✅ Auto-clean: drop leading/trailing static rows
 -----------------------------------------------------
@@ -113,7 +113,10 @@ print(f"🔗 Merged shape: {merged.shape}")
 # ---------- FEATURE ENGINEERING ----------
 def add_ta(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    df = df.interpolate(limit_direction="both")
+    # 🔥 CRITICAL FIX: REMOVED INTERPOLATION
+    # df = df.interpolate(limit_direction="both")  <-- This was creating fake weekend data
+    
+    # Use forward fill to propagate the last known Friday price through the weekend
     df = df.ffill().bfill()
 
     df["Return"] = df["GOLD_Close"].pct_change()
@@ -145,15 +148,13 @@ def add_ta(df: pd.DataFrame) -> pd.DataFrame:
         if asset in df.columns:
             df[f"Gold_{asset}_Ratio"] = df["GOLD_Close"] / (df[asset] + 1e-6)
             df[f"Corr_{asset}_24h"] = df["GOLD_Close"].rolling(24).corr(df[asset])
+    
     # --- Advanced Gold Scalper+ Features ---
-    # 过去 1小时、6小时 滞后收益
     df["Lag_Return_1h"] = df["Return"].shift(1)
     df["Lag_Return_6h"] = df["Return"].shift(6)
 
-    # 移动平均差 (趋势强度)
     df["MA_diff"] = df["SMA_20"] - df["SMA_50"]
 
-    # 24小时标准化Z-score
     rolling_mean = df["GOLD_Close"].rolling(24).mean()
     rolling_std = df["GOLD_Close"].rolling(24).std()
     df["Rolling_Zscore_24h"] = (df["GOLD_Close"] - rolling_mean) / (rolling_std + 1e-9)
@@ -167,12 +168,8 @@ print("⚙️ Generating technical indicators...")
 merged = add_ta(merged)
 
 # ---------- AUTO CLEAN HEAD/TAIL ----------
-print("🧹 Removing initialization and tail rows...")
-initial_rows = 14
-tail_rows = 20
-merged = merged.iloc[initial_rows:-tail_rows].reset_index(drop=True)
-
 # Remove long flat segments (where price doesn’t change)
+# This effectively deletes the static weekend rows created by ffill()
 merged = merged.loc[merged["GOLD_Close"].diff().abs() > 1e-6].reset_index(drop=True)
 
 # ---------- SAVE ----------

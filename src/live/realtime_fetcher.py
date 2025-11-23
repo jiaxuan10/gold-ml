@@ -39,7 +39,7 @@ def fetch_latest_window():
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(hours=HIST_WINDOW)
 
-    print(f"📡 Connecting to Yahoo Finance... ({datetime.now().time()})")
+    print(f"📡 Connecting to Yahoo Finance... ({datetime.now().strftime('%H:%M:%S')})")
     df = yf.download(
         tickers=list(ASSETS.values()),
         start=start_date,
@@ -72,18 +72,33 @@ def fetch_latest_window():
         "High": "GOLD_High", "Low": "GOLD_Low", "Volume": "GOLD_Volume"
     })
     
-    # Merge other assets (DXY, BTC, etc.)
+    # Merge other assets
     for sym in ASSETS.values():
         if sym == "GC=F": continue
         if sym in df.columns.levels[0]:
             sub = df[sym][["Close"]].reset_index().rename(columns={"Datetime": "Date", "Close": sym})
-            # Merge logic
             merged = pd.merge_asof(merged.sort_values("Date"), sub.sort_values("Date"), on="Date")
 
-    # Apply Unified Features
+# ... (前面的 merge 代码保持不变) ...
+
+    # 1. 先填充 (ffill) 
+    # 这一步是为了防止因为某些资产偶尔缺数据导致 NaN
+# ... (ffill 之后) ...
+    merged = merged.ffill().bfill()
+
+    # ✅【新增】双保险：确保 Date 是时间格式，否则 .dt.dayofweek 会报错或失效
+    merged["Date"] = pd.to_datetime(merged["Date"], utc=True)
+
+    # 🔥 切除周末 (0=Mon, 4=Fri, 5=Sat, 6=Sun)
+    merged = merged[merged["Date"].dt.dayofweek < 5].reset_index(drop=True)
+    
+    # ... (后面接 add_technical_features)
+
+    # 2. 然后再计算指标 (此时数据在时间上是“无缝拼接”的)
+    # 周五 23:00 的下一行直接就是 周一 07:00
     merged = add_technical_features(merged)
     
-    # Trim to save space (keep last 100 rows is enough for inference, but keep more for charts)
+    # Trim to save space
     return merged.tail(200)
 
 if __name__ == "__main__":

@@ -11,55 +11,46 @@ import numpy as np
 import warnings
 from datetime import datetime, timezone
 
-# Suppress warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# ====== CONFIG PATHS ======
+# ====== CONFIG ======
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_DIR = os.path.join(ROOT, "data", "final")
 MODELS_DIR = os.path.join(ROOT, "models")
 LATEST_CSV = os.path.join(DATA_DIR, "latest_hour_features.csv")
+SENTIMENT_FILE = os.path.join(DATA_DIR, "current_sentiment.json")
 
-# ====== STRATEGY CONFIG (MATCHING v6.6 STABLE) ======
+# Strategy Params
 INITIAL_CAPITAL = 10000.0
-BASE_RISK_PCT = 0.02        # 2% Risk
-ATR_SL_MULT = 1.5           # SL = 1.5x ATR
-ATR_TP_MULT = 4.0           # TP = 4.0x ATR
-MAX_POS_FRAC = 0.5          # Max 50% Equity
-VOL_WINDOW = 24
-VOL_THRESHOLD_PCTL = 0.995  # 99.5% Volatility Cutoff
+BASE_RISK_PCT = 0.02
+ATR_SL_MULT = 1.5
+ATR_TP_MULT = 4.0
+MAX_POS_FRAC = 0.5
+VOL_THRESHOLD_PCTL = 0.995
 REGIME_WEIGHTS = {"bull": 1.2, "neutral": 1.0, "bear": 0.9}
-ENABLE_TRAILING = False     # Default Off
+ENABLE_TRAILING = False
 TRAILING_ATR_MULT = 1.2
 
-# ====== IMPORTS ======
-sys.path.append(os.path.join(ROOT, "src"))
-from utils.market_regime_detector import MarketRegimeDetector
-
-# ====== STATE MANAGEMENT ======
+# State Files
 PRED_JSON = os.path.join(DATA_DIR, "latest_prediction.json")
 PRED_LOG = os.path.join(DATA_DIR, "prediction_log.csv")
 TRADE_LOG = os.path.join(DATA_DIR, "trade_log.csv")
 PORTFOLIO_STATE = os.path.join(DATA_DIR, "portfolio_state.json")
 
+sys.path.append(os.path.join(ROOT, "src"))
+from utils.market_regime_detector import MarketRegimeDetector
+
 def load_portfolio():
     default = {
         "balance": INITIAL_CAPITAL, "position": 0.0, "entry_price": 0.0, 
-        "sl": 0.0, "tp": 0.0, "trail_stop": 0.0, "equity": INITIAL_CAPITAL
+        "sl": 0.0, "tp": 0.0, "trail_stop": 0.0, "equity": INITIAL_CAPITAL, "last_candle": None
     }
     if not os.path.exists(PORTFOLIO_STATE): return default
     try:
         with open(PORTFOLIO_STATE, "r") as f:
-            data = f.read().strip()
-            if not data: return default
-            loaded = json.loads(data)
-            # Robustness: Ensure all keys exist
-            for k, v in default.items():
-                if k not in loaded: loaded[k] = v
-            return loaded
-    except:
-        return default
+            return {**default, **json.load(f)}
+    except: return default
 
 def save_portfolio(p):
     with open(PORTFOLIO_STATE, "w") as f: json.dump(p, f)
@@ -70,185 +61,166 @@ def log_trade(date, side, price, size, pnl=0, reason=""):
         if not exists: f.write("Date,Side,Price,Size,PnL,Reason,Balance\n")
         f.write(f"{date},{side},{price},{size:.4f},{pnl:.2f},{reason},{portfolio['balance']:.2f}\n")
 
-# ====== MODEL LOADING ======
+def get_sentiment_modifier():
+    if not os.path.exists(SENTIMENT_FILE): return 0.0, "NoNews"
+    try:
+        with open(SENTIMENT_FILE, "r") as f:
+            data = json.load(f)
+            score = data.get("sentiment_score", 0.0)
+            if score > 0.2: return -0.015, f"BullNews({score:.2f})"
+            if score > 0.05: return -0.005, f"GoodNews({score:.2f})"
+            if score < -0.2: return 0.02, f"BearNews({score:.2f})"
+            if score < -0.05: return 0.005, f"BadNews({score:.2f})"
+            return 0.0, "NeutralNews"
+    except: return 0.0, "Error"
+
+# Load Model
 try:
     LATEST_RUN = sorted([d for d in os.listdir(MODELS_DIR) if d.startswith("run_")])[-1]
     pkl_name = f"ensemble_calibrated_{LATEST_RUN.split('_')[1]}_{LATEST_RUN.split('_')[2]}.pkl"
     MODEL_PATH = os.path.join(MODELS_DIR, LATEST_RUN, pkl_name)
-    print(f"📂 Model: {MODEL_PATH}")
+    print(f"📂 Loading Model: {MODEL_PATH}")
     with open(MODEL_PATH, "rb") as f: model_meta = pickle.load(f)
 except Exception as e:
     print(f"❌ Model Error: {e}")
     sys.exit(1)
 
 calib_model = model_meta["calibrated_model"]
-feature_cols = model_meta["feature_cols"]
-optimal_threshold = model_meta.get("threshold", 0.5)
+# 获取模型训练时用的特征列表 (这个列表里应该已经不含 Open/Close 了)
+feature_cols = model_meta["feature_cols"] 
+base_threshold = model_meta.get("threshold", 0.5)
 
 portfolio = load_portfolio()
-last_processed_time = None
+print(f"🚀 Live Engine Started. Risk: {BASE_RISK_PCT*100}% | Threshold: {base_threshold}")
 
-print(f"🚀 ProfitBoost v6.6 Live Engine Started.")
-print(f"⚙️  Risk: {BASE_RISK_PCT*100}% | SL: {ATR_SL_MULT}x ATR | VolFilter: {VOL_THRESHOLD_PCTL*100}%")
-
-# ====== MAIN LOOP ======
 while True:
     try:
-        if not os.path.exists(LATEST_CSV):
-            time.sleep(5)
-            continue
-
-        # 1. Load Data
-        try:
-            df = pd.read_csv(LATEST_CSV)
-        except:
-            time.sleep(1)
-            continue
-
-        # Standardize Columns
-        rename_map = {"GOLD_Close": "Close", "GOLD_Open": "Open", "GOLD_High": "High", "GOLD_Low": "Low"}
-        for gold_col, std_col in rename_map.items():
-            if gold_col in df.columns: df[std_col] = df[gold_col]
-
-        # Recalculate Live Indicators for Strategy
-        price_col = "GOLD_Close" if "GOLD_Close" in df.columns else "Close"
-        df["SMA_20_Live"] = df[price_col].rolling(20).mean()
-        df["SMA_60_Live"] = df[price_col].rolling(60).mean() 
+        portfolio = load_portfolio() 
         
-        # Regime Detection
-        detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
-        regime_df = detector.detect_regime(df)
+        if not os.path.exists(LATEST_CSV): time.sleep(5); continue
+        try: df = pd.read_csv(LATEST_CSV)
+        except: time.sleep(1); continue
+
+        rename_map = {"GOLD_Close": "Close", "GOLD_Open": "Open", "GOLD_High": "High", "GOLD_Low": "Low"}
+        for k, v in rename_map.items():
+            if k in df.columns: df[v] = df[k]
         
         latest_row = df.iloc[-1]
         latest_time = latest_row["Date"]
-        
-        if latest_time == last_processed_time:
-            time.sleep(5)
-            continue
-            
-        last_processed_time = latest_time
-        print(f"\n🔎 Analyzing Candle: {latest_time}")
 
-        # 2. Prepare Model Input
+        if portfolio.get("last_candle") == str(latest_time):
+            time.sleep(10); continue
+            
+        print(f"\n🔎 Analyzing: {latest_time}")
+        price = float(latest_row.get("Close", 0))
+        if price <= 0: continue
+
+        # Indicators
+        df["SMA_20_Live"] = df["Close"].rolling(20).mean()
+        df["SMA_60_Live"] = df["Close"].rolling(60).mean()
+        detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
+        regime_df = detector.detect_regime(df)
+        
+        # 🔥 Prepare Input for Model (Strict Feature Matching)
         input_df = pd.DataFrame(0.0, index=[0], columns=feature_cols)
         for col in feature_cols:
             if col in latest_row:
-                 val = latest_row[col]
-                 if pd.notna(val) and not np.isinf(val):
-                     input_df.loc[0, col] = float(val)
-                 else:
-                     if len(df) > 1:
-                         prev_val = df.iloc[-2].get(col, 0.0)
-                         if pd.notna(prev_val): input_df.loc[0, col] = float(prev_val)
+                input_df.loc[0, col] = float(latest_row[col])
+            else:
+                # 如果 CSV 里缺某个特征 (比如 Hour_Sin)，这里尝试用默认值填补，防止崩溃
+                # 但实际上 Fetcher 应该已经算好了
+                pass
+        
         input_df = input_df.fillna(0.0)
         
-        # 3. Predict
-        prob = calib_model.predict_proba(input_df.values)[0, 1]
-        model_signal = 1 if prob > optimal_threshold else 0
+        # Predict
+        raw_prob = calib_model.predict_proba(input_df.values)[0, 1]
 
-        # 4. Strategy Conditions
-        price = float(latest_row[price_col])
+        # Sentiment Adj
+        sent_adj, sent_reason = get_sentiment_modifier()
+        final_threshold = max(0.3, min(0.9, base_threshold + sent_adj))
+        
+        model_signal = 1 if raw_prob > final_threshold else 0
+
+        # Strategy Filters
         atr = float(latest_row.get("ATR_14", 2.0))
         vol_now = float(latest_row.get("Volatility_20", 0.0))
-        
-        # Momentum Check
         sma20 = df["SMA_20_Live"].iloc[-1]
         sma60 = df["SMA_60_Live"].iloc[-1]
-        if pd.isna(sma20) or pd.isna(sma60): momentum_ok = True
-        else: momentum_ok = sma20 > sma60
-        
-        # Volatility Check
+        momentum_ok = sma20 > sma60 if (pd.notna(sma20) and pd.notna(sma60)) else True
         vol_cutoff = df["Volatility_20"].quantile(VOL_THRESHOLD_PCTL)
-        if pd.isna(vol_cutoff): vol_cutoff = 100.0
-        vol_ok = vol_now <= vol_cutoff
+        vol_ok = vol_now <= (vol_cutoff if pd.notna(vol_cutoff) else 100)
+        curr_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
         
-        # Regime Check
-        current_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
-        regime_weight = REGIME_WEIGHTS.get(current_regime, 1.0)
-
-        # Final Signal
         want_long = (model_signal == 1) and momentum_ok and vol_ok
         
-        # Update Status (UTC)
+        # Save Status
         status = {
             "Date": str(latest_time), 
-            "probability": round(prob, 4), 
-            "threshold": round(optimal_threshold, 4),
+            "probability": round(raw_prob, 4), 
+            "base_threshold": round(base_threshold, 4),
+            "final_threshold": round(final_threshold, 4),
+            "sentiment_impact": sent_reason,
             "signal": 1 if want_long else 0, 
             "price": price, 
-            "regime": current_regime,
-            "vol_ok": bool(vol_ok), 
-            "mom_ok": bool(momentum_ok),
+            "regime": curr_regime,
             "last_updated": datetime.now(timezone.utc).isoformat()
         }
         with open(PRED_JSON, "w") as f: json.dump(status, f)
         pd.DataFrame([status]).to_csv(PRED_LOG, mode='a', header=not os.path.exists(PRED_LOG), index=False)
 
-        # ====== 5. EXECUTION ENGINE ======
+        # Execution
         pos = portfolio["position"]
         bal = portfolio["balance"]
+        action_taken = False 
 
-        # --- Exit Logic ---
+        # EXIT
         if pos > 0:
             if price <= portfolio["sl"]:
+                reason = "Stop Loss"
                 pnl = (portfolio["sl"] - portfolio["entry_price"]) * pos
-                portfolio["balance"] += (portfolio["sl"] * pos)
+                portfolio["balance"] += portfolio["sl"] * pos
                 portfolio["position"] = 0.0
-                log_trade(latest_time, "SELL", portfolio["sl"], pos, pnl, "Stop Loss")
-                print(f"🛑 SL Hit @ {portfolio['sl']:.2f}")
-            
-            elif ENABLE_TRAILING and price <= portfolio["trail_stop"]:
-                pnl = (portfolio["trail_stop"] - portfolio["entry_price"]) * pos
-                portfolio["balance"] += (portfolio["trail_stop"] * pos)
-                portfolio["position"] = 0.0
-                log_trade(latest_time, "SELL", portfolio["trail_stop"], pos, pnl, "Trailing Stop")
-                print(f"🛑 Trail Hit @ {portfolio['trail_stop']:.2f}")
-
-            elif not want_long: 
-                revenue = price * pos
+                log_trade(latest_time, "SELL", portfolio["sl"], pos, pnl, reason)
+                print(f"🛑 {reason}")
+                action_taken = True
+            elif not want_long:
+                reason = f"Exit(Prob {raw_prob:.2f} < {final_threshold:.2f})"
                 pnl = (price - portfolio["entry_price"]) * pos
-                portfolio["balance"] += revenue
+                portfolio["balance"] += price * pos
                 portfolio["position"] = 0.0
-                log_trade(latest_time, "SELL", price, pos, pnl, "Strategy Exit")
-                print(f"🔴 Strategy Exit @ {price:.2f} | PnL: {pnl:.2f}")
-                
-            elif ENABLE_TRAILING:
-                new_trail = max(portfolio["trail_stop"], price - (atr * TRAILING_ATR_MULT))
-                portfolio["trail_stop"] = new_trail
+                log_trade(latest_time, "SELL", price, pos, pnl, reason)
+                print(f"🔴 {reason}")
+                action_taken = True
 
-        # --- Entry Logic ---
-        if want_long and pos == 0:
-            median_vol = df["Volatility_20"].median()
-            if pd.isna(median_vol): median_vol = vol_now
-            
-            vol_scale = np.clip((median_vol + 1e-9) / (vol_now + 1e-9), 0.5, 1.5)
+        # ENTRY
+        if not action_taken and want_long and pos == 0:
+            regime_weight = REGIME_WEIGHTS.get(curr_regime, 1.0)
             stop_dist = max(atr * ATR_SL_MULT, price * 0.0005)
-            risk_amt = bal * BASE_RISK_PCT * regime_weight * vol_scale
-            calc_units = risk_amt / stop_dist
-            max_units = (bal * MAX_POS_FRAC) / price
-            final_units = min(calc_units, max_units)
+            risk_amt = bal * BASE_RISK_PCT * regime_weight
+            units = min(risk_amt / stop_dist, (bal * MAX_POS_FRAC) / price)
             
-            if final_units > 0.0001:
-                cost = final_units * price
-                portfolio["balance"] -= cost
-                portfolio["position"] = final_units
+            if units > 0.0001:
+                portfolio["balance"] -= units * price
+                portfolio["position"] = units
                 portfolio["entry_price"] = price
                 portfolio["sl"] = price - stop_dist
                 portfolio["tp"] = price + (atr * ATR_TP_MULT)
-                portfolio["trail_stop"] = price - (atr * TRAILING_ATR_MULT)
-                
-                reason = f"Conf:{prob:.2f}|Reg:{current_regime}|Vol:{vol_scale:.2f}"
-                log_trade(latest_time, "BUY", price, final_units, 0, reason)
-                print(f"🟢 BUY @ {price:.2f} | Size: {final_units:.4f} | {reason}")
+                reason = f"Buy(Prob {raw_prob:.2f} > {final_threshold:.2f}) | {sent_reason}"
+                log_trade(latest_time, "BUY", price, units, 0, reason)
+                print(f"🟢 {reason}")
+                action_taken = True
 
-        # --- Update Equity (FIXED) ---
-        # Equity = Cash + Market Value of Holdings
-        market_value = portfolio["position"] * price
-        portfolio["equity"] = portfolio["balance"] + market_value
-        
+        if not action_taken:
+            status_side = "HOLD" if pos > 0 else "WAIT"
+            reason = f"{sent_reason} | Prob:{raw_prob:.2f} vs Thr:{final_threshold:.2f}"
+            log_trade(latest_time, status_side, price, 0.0, 0.0, reason)
+            print(f"⏳ {status_side} | {reason}")
+
+        portfolio["equity"] = portfolio["balance"] + (portfolio["position"] * price)
+        portfolio["last_candle"] = str(latest_time)
         save_portfolio(portfolio)
-        
-        print(f"📊 Equity: ${portfolio['equity']:.2f} | Prob: {prob:.1%} | Regime: {current_regime}")
+        print(f"📊 Equity: ${portfolio['equity']:.2f}")
 
     except Exception as e:
         print(f"⚠️ Error: {e}")
