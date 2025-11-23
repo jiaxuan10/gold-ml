@@ -81,14 +81,32 @@ def fetch_and_analyze(nlp):
             print(f"⚠️ Error {keyword}: {e}")
 
     # 1. Save List to CSV 🆕
+
     if articles_data:
-        df = pd.DataFrame(articles_data)
-        # 按时间倒序
-        df = df.sort_values("Date", ascending=False)
-        df.to_csv(NEWS_LIST_FILE, index=False)
-        print(f"✅ Saved {len(df)} articles to CSV.")
-    else:
-        print("⚠️ No relevant articles found.")
+        new_df = pd.DataFrame(articles_data)
+        
+        # Check if old file exists
+        if os.path.exists(NEWS_LIST_FILE):
+            try:
+                old_df = pd.read_csv(NEWS_LIST_FILE)
+                # Combine new and old
+                combined_df = pd.concat([new_df, old_df], ignore_index=True)
+                # Deduplicate based on 'Title' (keep the first/newest occurrence)
+                combined_df = combined_df.drop_duplicates(subset=["Title"], keep='first')
+            except:
+                combined_df = new_df
+        else:
+            combined_df = new_df
+            
+        # Sort by Date descending (Newest on top)
+        combined_df = combined_df.sort_values("Date", ascending=False)
+        
+        # Optional: Limit size (e.g., keep last 100 news items to prevent huge file)
+        combined_df = combined_df.head(100)
+        
+        combined_df.to_csv(NEWS_LIST_FILE, index=False)
+        print(f"✅ Updated news list. Total count: {len(combined_df)}")
+
 
     # 2. Calculate Average for Inference
     if all_scores:

@@ -55,7 +55,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # 🔥 [MODIFIED] 提高阈值 (0.03% -> 0.1%)
 # 目的：只学习真正的趋势，过滤掉微小的震荡，大幅提高 Precision
-LABEL_THRESHOLD = 0.00025  
+LABEL_THRESHOLD = 0.00035
 
 INNER_VAL_FRAC = 0.1         
 
