@@ -79,26 +79,36 @@ def fetch_latest_window():
             sub = df[sym][["Close"]].reset_index().rename(columns={"Datetime": "Date", "Close": sym})
             merged = pd.merge_asof(merged.sort_values("Date"), sub.sort_values("Date"), on="Date")
 
-# ... (前面的 merge 代码保持不变) ...
-
     # 1. 先填充 (ffill) 
     # 这一步是为了防止因为某些资产偶尔缺数据导致 NaN
-# ... (ffill 之后) ...
     merged = merged.ffill().bfill()
 
-    # ✅【新增】双保险：确保 Date 是时间格式，否则 .dt.dayofweek 会报错或失效
+    # ✅ 关键逻辑一：确保时间格式并剔除周六 (Closed Market)
+    # 0=Mon, 4=Fri, 5=Sat(休市), 6=Sun(晚上开市)
     merged["Date"] = pd.to_datetime(merged["Date"], utc=True)
+    merged = merged[merged["Date"].dt.dayofweek != 5].reset_index(drop=True)
 
-    # 🔥 切除周末 (0=Mon, 4=Fri, 5=Sat, 6=Sun)
-    merged = merged[merged["Date"].dt.dayofweek < 5].reset_index(drop=True)
-    
-    # ... (后面接 add_technical_features)
+    # ✅ 关键逻辑二：剔除“僵尸数据” (Flat Line Cleaner)
+    # 如果 Close 价格跟上一行完全一样，说明这是 ffill 制造的假数据（例如假期休市）
+    # diff() 计算差值，abs() 取绝对值，> 1e-6 意味着“只要有极微小的变动就保留”
+    # fillna(1.0) 是为了保护第一行不被删掉
+    if "GOLD_Close" in merged.columns:
+        merged = merged[merged["GOLD_Close"].diff().fillna(1.0).abs() > 1e-6].reset_index(drop=True)
 
-    # 2. 然后再计算指标 (此时数据在时间上是“无缝拼接”的)
-    # 周五 23:00 的下一行直接就是 周一 07:00
+    # ✅ 关键逻辑三：剔除“未完成”的最新 K 线 (Unfinished Candle Logic)
+    # 只有当 K 线时间 < 当前时间 (即已经过去的完整小时) 才保留
+    if not merged.empty:
+        current_utc_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        last_row_time = merged["Date"].iloc[-1]
+        
+        if last_row_time >= current_utc_hour:
+            print(f"✂️ Dropping unfinished candle: {last_row_time} (Current UTC: {current_utc_hour})")
+            merged = merged.iloc[:-1]
+
+    # 2. 然后再计算指标 (此时数据在时间上是“无缝拼接”且“完整”的)
     merged = add_technical_features(merged)
     
-    # Trim to save space
+    # Trim to save space (keep last 200 rows is enough for inference)
     return merged.tail(200)
 
 if __name__ == "__main__":
@@ -108,7 +118,7 @@ if __name__ == "__main__":
             data = fetch_latest_window()
             if data is not None and not data.empty:
                 data.to_csv(OUTPUT_CSV, index=False)
-                print(f"✅ Data Updated. Last Candle: {data['Date'].iloc[-1]}")
+                print(f"✅ Data Updated. Last Candle Used: {data['Date'].iloc[-1]}")
             else:
                 print("⚠️ Fetch failed or empty.")
         except Exception as e:

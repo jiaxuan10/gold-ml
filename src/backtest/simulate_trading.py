@@ -19,7 +19,7 @@ from features.features_engineering import add_technical_features
 from strategy import ProfitBoostStrategy
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-MODEL_PATH = os.path.join(ROOT, "models", "run_20251120_013217", "ensemble_calibrated_20251120_013217.pkl")
+MODEL_PATH = os.path.join(ROOT, "models", "run_20251123_231647", "ensemble_calibrated_20251123_231647.pkl")
 DATA_PATH = os.path.join(ROOT, "data", "final", "final_dataset_hourly.csv")
 SAVE_DIR = os.path.join(ROOT, "backtest_results")
 os.makedirs(SAVE_DIR, exist_ok=True)

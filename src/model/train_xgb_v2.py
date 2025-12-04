@@ -175,7 +175,26 @@ def main(csv_path=CSV_PATH):
                 "cv_mean": cv_mean, "cv_std": cv_std, "test_acc": acc, "test_f1": f1,
                 "test_precision": precision, "test_recall": recall, "supports_proba": probs_test is not None
             }
-            print(f"{name:<8} | CV={cv_mean:.3f} | Test={acc:.3f} | f1={f1:.3f}")
+            # 原来的代码只是 print
+            # print(f"{name:<8} | CV={cv_mean:.3f} ± {cv_std:.3f} | Test={acc:.3f} | f1={f1:.3f}")
+
+            # 🔥 修改为：先把指标转换成 Python float (JSON 序列化需要)，然后存入 results
+            acc = float(accuracy_score(y_test, preds_test))
+            f1 = float(f1_score(y_test, preds_test))
+            precision = float(precision_score(y_test, preds_test))
+            recall = float(recall_score(y_test, preds_test))
+
+            trained_models[name] = model
+            results[name] = {
+                "cv_mean": float(cv_mean), 
+                "cv_std": float(cv_std),
+                "test_acc": acc,
+                "test_f1": f1,
+                "test_precision": precision,
+                "test_recall": recall,
+                "supports_proba": probs_test is not None
+            }
+            print(f"{name:<8} | CV={cv_mean:.3f} | Test={acc:.3f} | F1={f1:.3f} | Prec={precision:.3f}")
 
         except Exception as e:
             print(f"⚠️ {name} failed: {e}")
@@ -273,6 +292,47 @@ def main(csv_path=CSV_PATH):
         pickle.dump({"calibrated_model": calib, "raw_ensemble": ensemble, "threshold": best_thr, "feature_cols": feature_cols}, f)
         
     print(f"\n💾 Saved model to {model_save_path}")
+
+    # ... (接着上面的 feature_importances 代码) ...
+
+    # 🔥🔥🔥【新增】构建 Mega Report 🔥🔥🔥
+    
+    # 1. 整理 Feature Importance (把 numpy 类型转成 float，否则 json 报错)
+    serializable_fi = {}
+    for model_name, fi_dict in feature_importances.items():
+        serializable_fi[model_name] = {k: float(v) for k, v in fi_dict.items()}
+
+    # 2. 构建大字典
+    comprehensive_report = {
+        "metadata": {
+            "timestamp": timestamp,
+            "rows_loaded": len(df),
+            "features_count": len(feature_cols),
+            "feature_names": feature_cols,
+            "label_threshold": LABEL_THRESHOLD,
+            "best_threshold_validation": float(best_thr)
+        },
+        "ensemble_performance": {
+            "accuracy": float(final_acc),
+            "f1_score": float(final_f1),
+            "precision": float(final_prec),
+            "recall": float(final_rec),
+            "selected_models": top_models,
+            "voting_weights": weights.tolist() if weights is not None else []
+        },
+        "base_models_performance": results,  # 包含了所有单体模型的详细得分
+        "feature_importances": serializable_fi
+    }
+
+    # 3. 保存为 comprehensive_report.json
+    json_path = os.path.join(report_dir, "comprehensive_report.json")
+    with open(json_path, "w") as f:
+        json.dump(comprehensive_report, f, indent=2, default=str)
+
+    # 4. (可选) 依然保存 summary_report.json 以兼容旧版 UI
+    # ... (原有的 summary_report 保存代码保持不变) ...
+    
+    print(f"📄 Comprehensive Report saved to {json_path}")
 
 if __name__ == "__main__":
     main()
