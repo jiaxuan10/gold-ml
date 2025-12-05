@@ -36,7 +36,7 @@ def fetch_and_analyze(nlp):
     to_date = datetime.now()
     from_date = to_date - timedelta(days=2) 
     
-    articles_data = [] # 🆕 用于存储原始新闻
+    articles_data = [] 
     all_scores = []
     
     for keyword in KEYWORDS:
@@ -45,21 +45,33 @@ def fetch_and_analyze(nlp):
             url = (f"https://newsapi.org/v2/everything?q={keyword}&language=en&"
                    f"from={from_date.date()}&sortBy=publishedAt&pageSize=100&apiKey={NEWS_API_KEY}")
             resp = requests.get(url, timeout=10)
-            articles = resp.json().get("articles", [])
+            
+            # 增加容错：万一 API 返回非 JSON 格式
+            try:
+                data = resp.json()
+            except:
+                print(f"⚠️ API Response Error for {keyword}")
+                continue
+                
+            articles = data.get("articles", [])
             
             for art in articles:
                 title = art.get("title", "")
+                if not title: continue
+                
                 source = art.get("source", {}).get("name", "Unknown")
                 url_link = art.get("url", "")
                 date_str = art.get("publishedAt", "")
                 
-                # Filter
+                # 1. Filter
                 if any(w in title.lower() for w in IRRELEVANT_WORDS): continue
                 
-                # Deduplicate (simple check in current batch)
-                if any(d['title'] == title for d in articles_data): continue
+                # 2. Deduplicate (关键修复点 🔥)
+                # 使用 d.get("Title") 既能匹配大写 Key，又不会因为找不到 key 而报错
+                # 或者明确使用 d["Title"]
+                if any(d.get('Title') == title for d in articles_data): continue
                 
-                # Analyze
+                # 3. Analyze
                 res = nlp(title[:512])[0]
                 label = res['label']
                 prob = res['score']
@@ -71,44 +83,40 @@ def fetch_and_analyze(nlp):
                 articles_data.append({
                     "Date": date_str,
                     "Source": source,
-                    "Title": title,
+                    "Title": title, # 存的时候是大写 Title
                     "Label": label,
                     "Score": round(score, 4),
                     "URL": url_link
                 })
                 
         except Exception as e:
-            print(f"⚠️ Error {keyword}: {e}")
+            # 打印完整的错误堆栈，方便调试
+            print(f"⚠️ Error processing '{keyword}': {e}")
 
-    # 1. Save List to CSV 🆕
-
+    # Save List to CSV (Append Mode)
     if articles_data:
         new_df = pd.DataFrame(articles_data)
         
-        # Check if old file exists
         if os.path.exists(NEWS_LIST_FILE):
             try:
                 old_df = pd.read_csv(NEWS_LIST_FILE)
-                # Combine new and old
                 combined_df = pd.concat([new_df, old_df], ignore_index=True)
-                # Deduplicate based on 'Title' (keep the first/newest occurrence)
+                # CSV 读取后列名通常保持原样 (Title)
                 combined_df = combined_df.drop_duplicates(subset=["Title"], keep='first')
             except:
                 combined_df = new_df
         else:
             combined_df = new_df
             
-        # Sort by Date descending (Newest on top)
         combined_df = combined_df.sort_values("Date", ascending=False)
-        
-        # Optional: Limit size (e.g., keep last 100 news items to prevent huge file)
         combined_df = combined_df.head(100)
         
         combined_df.to_csv(NEWS_LIST_FILE, index=False)
         print(f"✅ Updated news list. Total count: {len(combined_df)}")
+    else:
+        print("⚠️ No NEW relevant articles found.")
 
-
-    # 2. Calculate Average for Inference
+    # Calculate Average
     if all_scores:
         avg_sentiment = sum(all_scores) / len(all_scores)
     else:
