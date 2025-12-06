@@ -68,26 +68,25 @@ def get_sentiment_modifier():
             data = json.load(f)
             score = data.get("sentiment_score", 0.0)
             
-            # === ✅ 修正：数值改回 0.01，文字改回 BearNews ===
-            
-            # 1. 极好新闻 (> 0.2) -> 门槛降低 0.01
+            # 1. 极好新闻 (> 0.2) -> 门槛降低 0.02
             if score > 0.2: 
-                return -0.01, f"BullNews({score:.2f})"
+                return -0.02, f"BullNews({score:.2f})"
             
-            # 2. 稍好新闻 (> 0.05) -> 门槛降低 0.005
+            # 2. 稍好新闻 (> 0.05) -> 门槛降低 0.01
             if score > 0.05: 
-                return -0.005, f"GoodNews({score:.2f})"
+                return -0.01, f"GoodNews({score:.2f})"
             
-            # 3. 极差新闻 (< -0.2) -> 门槛升高 0.01
+            # 3. 极差新闻 (< -0.2) -> 门槛升高 0.02
             if score < -0.2: 
-                return 0.01, f"BearNews({score:.2f})"
+                return 0.02, f"BearNews({score:.2f})"
             
-            # 4. 稍差新闻 (< -0.05) -> 门槛升高 0.005
+            # 4. 稍差新闻 (< -0.05) -> 门槛升高 0.01
             if score < -0.05: 
-                return 0.005, f"BadNews({score:.2f})"
+                return 0.01, f"BadNews({score:.2f})"
             
             return 0.0, "NeutralNews"
     except: return 0.0, "Error"
+
 # Load Model
 try:
     LATEST_RUN = sorted([d for d in os.listdir(MODELS_DIR) if d.startswith("run_")])[-1]
@@ -100,11 +99,9 @@ except Exception as e:
     sys.exit(1)
 
 calib_model = model_meta["calibrated_model"]
-# 🔥 重要：这会自动获取模型训练时用的特征列表 (不含 Open/Close)
 feature_cols = model_meta["feature_cols"] 
 # base_threshold = model_meta.get("threshold", 0.5)
-# base_threshold = model_meta.get("threshold", 0.5) # Comment out the original
-base_threshold = 0.50 # <--- FORCE IT TO 50% (Coin flip odds)
+base_threshold = 0.50 # <--- FYP MODE: Forced to 0.50
 print(f"⚠️ FYP MODE: Overriding threshold to {base_threshold} to force trades.")
 
 portfolio = load_portfolio()
@@ -125,9 +122,30 @@ while True:
         latest_row = df.iloc[-1]
         latest_time = latest_row["Date"]
 
-        # 🔥 周末休市检查 (UTC时间 周六/周日)
-        # 这能防止系统在周末对着周五的旧数据空转
-        # fetcher 已经切掉了周末数据，所以如果读到了周五的数据，这里会一直等到周一新数据来才动
+        # 🔥🔥🔥【新增】过期数据熔断机制 (Stale Data Breaker) 🔥🔥🔥
+        try:
+            # 1. 确保 latest_time 是 datetime 对象
+            if isinstance(latest_time, str):
+                dt_latest = pd.to_datetime(latest_time, utc=True)
+            else:
+                dt_latest = latest_time
+
+            # 2. 获取当前 UTC 时间
+            now_utc = datetime.now(timezone.utc)
+            
+            # 3. 计算滞后时间 (小时)
+            time_lag = (now_utc - dt_latest).total_seconds() / 3600
+            
+            # 4. 如果数据滞后超过 2 小时，视为过期数据，直接跳过
+            if time_lag > 2.0:
+                print(f"⚠️ Data Stale! Latest: {dt_latest}, Now: {now_utc.strftime('%H:%M')}. Lag: {time_lag:.1f}h. Skipping...")
+                time.sleep(10)
+                continue
+        except Exception as e:
+            pass # 如果时间检查出错，暂时忽略，以免卡死
+        # 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+
+        # 检查是否已经处理过这根 K 线
         if portfolio.get("last_candle") == str(latest_time):
             time.sleep(10); continue
             
@@ -141,13 +159,11 @@ while True:
         detector = MarketRegimeDetector(ma_fast=20, ma_slow=50)
         regime_df = detector.detect_regime(df)
         
-        # 🔥 Prepare Input for Model (Strict Feature Matching)
-        # 即使 CSV 里有 Close，我们只提取 feature_cols 里的列
+        # Prepare Input
         input_df = pd.DataFrame(0.0, index=[0], columns=feature_cols)
         for col in feature_cols:
             if col in latest_row:
                 input_df.loc[0, col] = float(latest_row[col])
-            # 如果某些特征缺失 (例如 Hour_Sin)，用 0 填充防止报错
         
         input_df = input_df.fillna(0.0)
         
@@ -170,8 +186,7 @@ while True:
         vol_ok = vol_now <= (vol_cutoff if pd.notna(vol_cutoff) else 100)
         curr_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
         
-        # want_long = (model_signal == 1) and momentum_ok and vol_ok
-        want_long = (model_signal == 1)
+        want_long = (model_signal == 1) and momentum_ok and vol_ok
         
         # Save Status
         status = {
@@ -205,7 +220,7 @@ while True:
                 print(f"🛑 {reason}")
                 action_taken = True
             
-            # 2. 🆕 ADDED: Check Take Profit
+            # 2. Check Take Profit
             elif price >= portfolio["tp"]:
                 reason = "Take Profit"
                 pnl = (price - portfolio["entry_price"]) * pos
@@ -215,7 +230,7 @@ while True:
                 print(f"💰 {reason} Hit! PnL: ${pnl:.2f}")
                 action_taken = True
 
-            # 3. Check AI Signal (Exit if confidence drops below 50%)
+            # 3. Check Strategy Exit
             elif not want_long:
                 reason = f"Exit(Prob {raw_prob:.2f} < {final_threshold:.2f})"
                 pnl = (price - portfolio["entry_price"]) * pos

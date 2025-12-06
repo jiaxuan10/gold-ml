@@ -437,7 +437,7 @@ with t4:
 # ---------------------------------------------------------
 
 with t5:
-    st.markdown("### 🔬 Model Training Insights (Offline Analysis)")
+    st.markdown("### Model Training Insights (Offline Analysis)")
     
     # 1. Auto-locate the latest training report
     report_root = os.path.join(ROOT, "models")
@@ -581,7 +581,7 @@ with t5:
             with open(metrics_path, "r") as f:
                 m = json.load(f)
             
-            st.markdown("#### 📊 Performance Metrics Explained")
+            st.markdown("#### Performance Metrics Explained")
             
             # 使用 4 列布局，把 Win Rate 也加进去
             c1, c2, c3, c4 = st.columns(4)

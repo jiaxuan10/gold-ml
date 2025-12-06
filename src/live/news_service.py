@@ -117,10 +117,22 @@ def fetch_and_analyze(nlp):
         print("⚠️ No NEW relevant articles found.")
 
     # Calculate Average
+# 2. Calculate Average (优化版：只看有观点的新闻)
     if all_scores:
-        avg_sentiment = sum(all_scores) / len(all_scores)
+        # 过滤掉 0 分的新闻，只计算有态度的
+        active_scores = [s for s in all_scores if abs(s) > 0.1]
+        
+        if active_scores:
+            # 如果有观点，取平均
+            avg_sentiment = sum(active_scores) / len(active_scores)
+        else:
+            # 如果全是中性，那就中性
+            avg_sentiment = 0.0
+            
+        # 额外加成：如果全是有观点的新闻里，正负抵消了，还是给个 0
     else:
         avg_sentiment = 0.0
+
         
     return avg_sentiment
 
