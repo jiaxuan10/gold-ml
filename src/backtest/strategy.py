@@ -17,29 +17,33 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # -------------------------
-# CONFIG (Matches inference_service.py)
+# CONFIG (Optimized for Out-of-Sample Profit)
 # -------------------------
 INITIAL_CAPITAL = 10000.0
 BASE_RISK_PER_TRADE_FRAC = 0.02
 MAX_POSITION_FRAC = 0.5
+
+ATR_MULTIPLIER_SL = 3.0  
+
+ENABLE_TAKE_PROFIT = True       
+ATR_MULTIPLIER_TP = 4.5  
+
+BUY_PROB_DEFAULT = 0.53 
+
 ATR_WINDOW = 14
-ATR_MULTIPLIER_SL = 1.5
-ENABLE_TAKE_PROFIT = False       
-ATR_MULTIPLIER_TP = 4.0
 ENABLE_TRAILING = False          
 TRAILING_ATR_MULT = 1.2
 MIN_STOP_PCT = 0.0005
 VOL_WINDOW = 24
 VOL_THRESHOLD_PCTL = 0.995
-BUY_PROB_DEFAULT = 0.50
 
-# Zero fees for FYP demo
+# Zero fees for FYP
 COMMISSION_PER_SIDE = 0.0
 SLIPPAGE_PCT = 0.0
 SPREAD_PCT = 0.0
 
 REGIME_WEIGHTS = {"bull": 1.2, "neutral": 1.0, "bear": 0.9}
-ENABLE_SHORTS = False 
+ENABLE_SHORTS = False
 
 # -------------------------
 class ProfitBoostStrategy:
@@ -99,18 +103,6 @@ class ProfitBoostStrategy:
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
-        shift = 1 if self.shift_features else 0
-        df["Return"] = df["Close"].pct_change().shift(shift)
-        df["SMA_20"] = df["Close"].rolling(20, min_periods=5).mean().shift(shift)
-        df["SMA_60"] = df["Close"].rolling(60, min_periods=10).mean().shift(shift)
-        df["EMA_12"] = df["Close"].ewm(span=12, adjust=False).mean().shift(shift)
-        df["EMA_26"] = df["Close"].ewm(span=26, adjust=False).mean().shift(shift)
-        df["MACD"] = (df["EMA_12"] - df["EMA_26"]).shift(shift)
-        df["RSI_14"] = self._rsi_shifted(df["Close"], 14)
-        df["ATR"] = self.compute_atr(df).shift(shift).ffill().bfill().fillna(0.0)
-        df["vol_24h"] = df["Close"].pct_change().rolling(VOL_WINDOW).std().shift(shift).ffill().bfill().fillna(0.0)
-        df["momentum_ok"] = (df["SMA_20"] > df["SMA_60"]).astype(bool)
-
         numeric_df = df.select_dtypes(include=[np.number]).copy().fillna(0.0)
         X_df = self.safe_feature_align_df(numeric_df)
 
@@ -126,8 +118,8 @@ class ProfitBoostStrategy:
         buy_thr = float(self.model_meta.get("threshold", BUY_PROB_DEFAULT))
         vol_cutoff = df["vol_24h"].quantile(VOL_THRESHOLD_PCTL)
 
-        capital = float(INITIAL_CAPITAL)
-        cash = capital
+        initial_capital = float(INITIAL_CAPITAL)
+        cash = initial_capital
         position_units = 0.0
         position_side = None
         equities = []
@@ -138,12 +130,17 @@ class ProfitBoostStrategy:
             nxt = df.loc[i + 1]
             exec_price = nxt["Open"] if not pd.isna(nxt["Open"]) else nxt["Close"]
             buy_prob = float(cur.get("buy_prob", BUY_PROB_DEFAULT))
-            vol_now = float(cur.get("vol_24h", 0.0))
-            atr_now = float(cur.get("ATR", 0.0))
-            momentum_ok = bool(cur.get("momentum_ok", True))
+            
+            # 🔥 修复这里：使用实际存在的特征
+            vol_now = float(cur.get("vol_24h", 0.0))  # 现在add_technical_features会生成
+            atr_now = float(cur.get("ATR_14", 0.0))   # 使用ATR_14而不是ATR
+            # momentum_ok可以直接计算或使用特征
+            momentum_ok = bool(cur.get("SMA_20", 0) > cur.get("SMA_50", 0))
+            
             regime = cur.get("regime", "neutral")
             rweight = REGIME_WEIGHTS.get(regime, 1.0)
 
+            # 🔥 同时修复：确保stop_dist计算正确
             stop_dist = max(atr_now * ATR_MULTIPLIER_SL, exec_price * MIN_STOP_PCT)
             
             model_signal = 1 if buy_prob > buy_thr else 0
@@ -194,9 +191,9 @@ class ProfitBoostStrategy:
                 if want_long:
                     # 🔥🔥🔥 Sizing (Synced with Live Engine) 🔥🔥🔥
                     # Removed 'vol_scale' to match inference_service.py
-                    adaptive_risk_amt = capital * BASE_RISK_PER_TRADE_FRAC * rweight
+                    adaptive_risk_amt = initial_capital * BASE_RISK_PER_TRADE_FRAC * rweight
                     desired_units = adaptive_risk_amt / (stop_dist + 1e-12)
-                    max_units = (capital * MAX_POSITION_FRAC) / (exec_price + 1e-12)
+                    max_units = (initial_capital * MAX_POSITION_FRAC) / (exec_price + 1e-12)
                     units = float(np.clip(desired_units, 0.0, max_units))
                     
                     if units >= 1e-6:

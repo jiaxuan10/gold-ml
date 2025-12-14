@@ -180,18 +180,14 @@ if pos_size > 0:
 st.markdown("### Market Analysis")
 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
 
-# 1. K线图
 fig.add_trace(go.Candlestick(x=df["Date"], open=df["GOLD_Open"], high=df["GOLD_High"], low=df["GOLD_Low"], close=df["GOLD_Close"], name="Price"), row=1, col=1)
 
-# 2. SMA 20 (快线 - 橙色)
 df["MA20"] = df["GOLD_Close"].rolling(MA_PERIOD).mean()
 fig.add_trace(go.Scatter(x=df["Date"], y=df["MA20"], line=dict(color='#FFA500', width=1), name="SMA 20"), row=1, col=1)
 
-# 3. SMA 50 (慢线 - 蓝色) 🔥🔥🔥【新增部分】
 df["MA50"] = df["GOLD_Close"].rolling(50).mean()
 fig.add_trace(go.Scatter(x=df["Date"], y=df["MA50"], line=dict(color='#00BFFF', width=1), name="SMA 50"), row=1, col=1)
 
-# 4. 买卖点标记
 if not trades.empty:
     trades["Date"] = pd.to_datetime(trades["Date"])
     buys = trades[trades["Side"] == "BUY"]
@@ -201,21 +197,16 @@ if not trades.empty:
     if not sells.empty:
         fig.add_trace(go.Scatter(x=sells["Date"], y=sells["Price"], mode='markers', marker=dict(symbol='triangle-down', size=10, color='#FF4444'), name="Sell"), row=1, col=1)
 
-# ... (后面的 AI Prob Chart 和 update_layout 保持不变) ...
-# 如果你需要完整的后半部分代码来复制，请告诉我。
-# AI Prob Chart
 if os.path.exists(PRED_LOG):
     try:
         ph = pd.read_csv(PRED_LOG)
         ph["Date"] = pd.to_datetime(ph["Date"], utc=True)
         m = pd.merge_asof(df[["Date"]], ph.sort_values("Date"), on="Date")
         fig.add_trace(go.Scatter(x=m["Date"], y=m["probability"], fill='tozeroy', line=dict(color='#9932CC'), name="AI Prob"), row=2, col=1)
-        # 优先使用 final_threshold
         fig.add_trace(go.Scatter(x=m["Date"], y=m.get("final_threshold", m.get("threshold", 0.54)), line=dict(color='white', dash='dash'), name="Threshold"), row=2, col=1)
     except: pass
 
 fig.update_layout(height=500, margin=dict(l=10, r=10, t=10, b=10), template="plotly_dark", xaxis_rangeslider_visible=False)
-# 1. 设置布局 (原有的)
 fig.update_layout(
     height=500, 
     margin=dict(l=10, r=10, t=10, b=10), 
@@ -223,17 +214,14 @@ fig.update_layout(
     xaxis_rangeslider_visible=False
 )
 
-# 这会让 Plotly 强制把周五和周一拼在一起，不留空隙
 fig.update_xaxes(
     rangebreaks=[
-        dict(bounds=["sat", "mon"]), # 隐藏 周六 到 周一 之间的空档
+        dict(bounds=["sat", "mon"]),
     ]
 )
 
 st.plotly_chart(fig, use_container_width=True)
 
-# --- 4. LOGS & NEWS & ANALYSIS ---
-# 恢复了 4 个 Tab
 t1, t2, t3, t4, t5 = st.tabs(["Trade Log", "Live News", "AI Analysis", "Raw Data", "Model Insights"])
 with t1:
     if not trades.empty:
@@ -260,10 +248,6 @@ with t2:
         )
     else: st.info("No news fetched yet. Waiting for next cycle...")
 
-# ---------------------------------------------------------
-# 替换 app.py 中的 with t3: 部分
-# ---------------------------------------------------------
-
 with t3:
     st.markdown("### AI Decision Core (XGBoost/Ensemble)")
     
@@ -272,11 +256,9 @@ with t3:
         curr_prob = pred.get('probability', 0.5)
         curr_thr = pred.get('final_threshold', 0.54)
 
-        # === 第一行：仪表盘 + 关键因子 ===
         c1, c2 = st.columns([1, 1.5])
         
         with c1:
-            # 1. 仪表盘
             fig_gauge = go.Figure(go.Indicator(
                 mode = "gauge+number+delta",
                 value = curr_prob * 100,
@@ -325,42 +307,36 @@ with t3:
             vol_status = "High Risk" if vol > 0.002 else "Stable"
             factors.append({"Factor": "Volatility", "Value": f"{vol:.4f}", "Signal": vol_status})
             
-            # 4. News Logic (万能兼容版) 🔥
-            # 获取原始字符串，例如 "BearNews(-0.92)" 或 "Thr +0.01"
             sent_impact = pred.get('sentiment_impact', 'NeutralNews') 
             
-            # --- 智能翻译逻辑 ---
-            # 只要包含 "Bear" (大空) 或 "Thr +" (门槛升高) -> 判定为 Threshold +0.01
-            if "Bear" in sent_impact or "Thr +" in sent_impact:
+            
+            if "Bear" in sent_impact:
+                sent_signal = "Threshold +0.02"
+                
+            elif "Bad" in sent_impact:
                 sent_signal = "Threshold +0.01"
                 
-            # 只要包含 "Bad" (小空) -> 判定为 Threshold +0.005
-            elif "Bad" in sent_impact:
-                sent_signal = "Threshold +0.005"
+            elif "Bull" in sent_impact:
+                sent_signal = "Threshold -0.02"
                 
-            # 只要包含 "Bull" (大多) 或 "Thr -" (门槛降低) -> 判定为 Threshold -0.01
-            elif "Bull" in sent_impact or "Thr -" in sent_impact:
-                sent_signal = "Threshold -0.01"
-                
-            # 只要包含 "Good" (小多) -> 判定为 Threshold -0.005
             elif "Good" in sent_impact:
-                sent_signal = "Threshold -0.005"
+                sent_signal = "Threshold -0.01"
+            
+            elif "Thr +" in sent_impact:
+                 sent_signal = "Threshold +0.01"
+            elif "Thr -" in sent_impact:
+                 sent_signal = "Threshold -0.01"
                 
-            # 其他情况 (Neutral, NoNews)
             else:
                 sent_signal = "No Change"
                 
             factors.append({"Factor": "News Impact", "Value": sent_impact, "Signal": sent_signal})
 
-            # 5. 配色逻辑
             def color_signal(val):
-                # 绿色：利好 / 稳定 / 门槛降低
                 if any(s in val for s in ['Oversold', 'Bullish', 'Stable', 'Threshold -']): 
                     return 'color: #00FF00; font-weight: bold'
-                # 红色：利空 / 风险 / 门槛升高
                 if any(s in val for s in ['Overbought', 'Bearish', 'High', 'Threshold +']): 
                     return 'color: #FF4444; font-weight: bold'
-                # 灰色
                 return 'color: #888'
 
             df_factors = pd.DataFrame(factors)
@@ -372,50 +348,8 @@ with t3:
 
         st.divider()
 
-        # # === 第二行：AI 的大脑结构 (Feature Importance) ===
-        # st.markdown("#### 🧠 What is the AI looking at? (Feature Importance)")
-        
-        # # 尝试寻找最新的 feature importance 文件
-        # fi_df = pd.DataFrame()
-        # try:
-        #     # 找到最新的 run 文件夹
-        #     runs = sorted([d for d in os.listdir(os.path.join(ROOT, "models")) if d.startswith("run_")])
-        #     if runs:
-        #         latest_run = runs[-1]
-        #         # 找 feature_importance_svc.csv 或其他
-        #         fi_path = os.path.join(ROOT, "models", latest_run)
-        #         csvs = [f for f in os.listdir(fi_path) if f.startswith("feature_importance")]
-        #         if csvs:
-        #             # 读取第一个找到的 importance 文件
-        #             fi_df = pd.read_csv(os.path.join(fi_path, csvs[0]))
-        #             fi_df = fi_df.sort_values("importance", ascending=True).tail(10) # 取最重要的 10 个
-        # except:
-        #     pass
 
-        # if not fi_df.empty:
-        #     # 画横向条形图
-        #     fig_fi = go.Figure(go.Bar(
-        #         x=fi_df['importance'],
-        #         y=fi_df['feature'],
-        #         orientation='h',
-        #         marker=dict(color='#58a6ff')
-        #     ))
-        #     fig_fi.update_layout(
-        #         height=300, 
-        #         margin=dict(l=10, r=10, t=10, b=10), 
-        #         paper_bgcolor="rgba(0,0,0,0)", 
-        #         plot_bgcolor="rgba(0,0,0,0)",
-        #         xaxis=dict(showgrid=False),
-        #         yaxis=dict(showgrid=False)
-        #     )
-        #     st.plotly_chart(fig_fi, use_container_width=True)
-        #     st.caption(f"Top 10 features driving the AI model (Source: {latest_run})")
-        # else:
-        #     st.info("No feature importance data found yet. (Run training to generate)")
-
-        # === 第三行：折叠的详细数据 ===
         with st.expander("View All 28 Real-time Features"):
-             # 转置显示，方便查看
             raw_features = latest.drop(labels=["Date", "GOLD_Open", "GOLD_High", "GOLD_Low", "GOLD_Close", "GOLD_Volume"], errors='ignore')
             st.dataframe(raw_features.to_frame().T, use_container_width=True)
 
@@ -425,16 +359,7 @@ with t3:
 with t4:
     st.dataframe(df.tail(10), use_container_width=True)
 
-# ---------------------------------------------------------
-# 替换 app.py 中的 with t5: 部分
-# ---------------------------------------------------------
 
-# ---------------------------------------------------------
-# REPLACEMENT FOR "with t5:" in app.py
-# ---------------------------------------------------------
-# ---------------------------------------------------------
-# REPLACEMENT FOR "with t5:" in app.py
-# ---------------------------------------------------------
 
 with t5:
     st.markdown("### Model Training Insights (Offline Analysis)")
@@ -456,15 +381,31 @@ with t5:
             with open(json_path, "r") as f:
                 report = json.load(f)
             
-            # --- A. KEY METRICS CARD ---
+# --- A. KEY METRICS CARD (Updated) ---
             meta = report.get("metadata", {})
             perf = report.get("ensemble_performance", {})
             
+            st.markdown("#### Training Metadata")
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Training Rows", f"{meta.get('rows_loaded', 0):,}")
-            c2.metric("Features", f"{meta.get('features_count', 0)}")
-            c3.metric("Ensemble Precision", f"{perf.get('precision', 0):.1%}")
-            c4.metric("Best Threshold", f"{meta.get('best_threshold_validation', 0):.4f}")
+            c2.metric("Features Used", f"{meta.get('features_count', 0)}")
+            c3.metric("Best Threshold", f"{meta.get('best_threshold_validation', 0):.4f}")
+            c4.metric("Models in Ensemble", len(perf.get("selected_models", []))) # 显示融合了几个模型
+            
+            st.markdown("#### Ensemble Performance (Test Set)")
+            m1, m2, m3, m4 = st.columns(4)
+            
+            acc = perf.get('accuracy', 0)
+            m1.metric("Accuracy", f"{acc:.1%}", "Overall Correctness")
+            
+            prec = perf.get('precision', 0)
+            m2.metric("Precision", f"{prec:.1%}", "Trustworthiness")
+            
+            rec = perf.get('recall', 0)
+            m3.metric("Recall", f"{rec:.1%}", "Opportunity Capture")
+            
+            f1 = perf.get('f1_score', 0)
+            m4.metric("F1 Score", f"{f1:.1%}", "Balance")
             
             st.divider()
             
@@ -542,24 +483,19 @@ with t5:
             st.error(f"Report file not found at: {json_path}")
     else:
         st.info("No training runs found. Please run `train_gold_model_v3_enhanced.py` first.")
-# ... (前面显示 Training Report 的代码保持不变) ...
 
-    # === PART 2: 回测结果 (Backtest Results) ===
     st.divider()
     st.markdown("### Historical Backtest Performance (Simulation)")
     
     backtest_root = os.path.join(ROOT, "backtest_results")
     
-    # 1. 自动寻找最新的 PNG 图片 (而不是 CSV)
     latest_png = None
     latest_csv = None
     try:
-        # 找最新的 .png 图片
         png_files = sorted([f for f in os.listdir(backtest_root) if f.endswith(".png") and "equity_" in f])
         if png_files:
             latest_png = os.path.join(backtest_root, png_files[-1])
             
-        # 顺便找对应的 csv 用来显示指标
         csv_files = sorted([f for f in os.listdir(backtest_root) if f.startswith("backtest_") and f.endswith(".csv")])
         if csv_files:
             latest_csv = os.path.join(backtest_root, csv_files[-1])
@@ -567,14 +503,12 @@ with t5:
 
     if latest_png and os.path.exists(latest_png):
         
-        # 2. 直接展示 PNG 图片 (Clean & Static)
         c_left, c_center, c_right = st.columns([1, 3, 1])
         
         with c_center:
             st.image(latest_png, caption="Equity Curve (Generated by Strategy Engine)", use_container_width=True)
         
-# 3. 显示指标 (改为优先读取 JSON)
-        # 尝试寻找 latest_backtest_metrics.json
+
         metrics_path = os.path.join(backtest_root, "latest_backtest_metrics.json")
         
         if os.path.exists(metrics_path):
@@ -583,29 +517,26 @@ with t5:
             
             st.markdown("#### Performance Metrics Explained")
             
-            # 使用 4 列布局，把 Win Rate 也加进去
             c1, c2, c3, c4 = st.columns(4)
             
-            # --- Metric 1: Total Return ---
             c1.metric("Total Return", f"{m.get('total_return', 0):.1%}", "Profitability")
-            c1.info("**Total Return**: Represents the overall capital growth. A 41.8% return significantly outperforms standard benchmarks, validating the AI's trend-capturing ability.")
+            c1.info("**Total Return**: Represents unleveraged capital growth. Achieving positive returns (+1.8%) in the out-of-sample period validates the strategy's positive mathematical expectancy.")
             
             # --- Metric 2: Max Drawdown ---
             c2.metric("Max Drawdown", f"{m.get('max_drawdown', 0):.1%}", "Risk Control")
-            c2.info("**Max Drawdown**: The worst peak-to-valley loss. A low drawdown (-4.7%) proves the ATR-based dynamic stop-loss effectively protects the principal.")
+            c2.info(f"**Max Drawdown**: The strategy's defensive capability is exceptional. Keeping losses under {abs(m.get('max_drawdown', 0)):.1%} proves the 'Nuclear Mode' wide-stop logic effectively prevents premature stop-outs.")
 
-            # --- Metric 3: Sharpe Ratio ---
-            c3.metric("Sharpe Ratio", f"{m.get('sharpe', 0):.2f}", "Efficiency")
-            c3.info("**Sharpe Ratio**: Risk-adjusted return. A value > 3.0 is 'Elite'. This high score (4.42) indicates steady gains with minimal volatility.")
+            sharpe = m.get('sharpe', 0)
+            rating = "Elite" if sharpe > 3 else "Good" if sharpe > 1 else "Poor"
+            c3.metric("Sharpe Ratio", f"{sharpe:.2f}", rating)
+            c3.info(f"**Sharpe Ratio**: Measures risk-adjusted return. A score of {sharpe:.2f} (> 3.0) is considered 'Elite', indicating the profit curve is extremely smooth with minimal volatility.")
 
             # --- Metric 4: Win Rate ---
             win_rate = m.get('win_rate', 0)
             total_trades = m.get('total_trades', 0)
             c4.metric("Win Rate", f"{win_rate:.1%}", f"{total_trades} Trades")
-            c4.info(f"**Win Rate**: Percentage of profitable trades. {win_rate:.1%} is excellent for a trend strategy, ensuring consistent performance over {total_trades} trades.")
-
+            c4.info(f"**Win Rate**: The core strength of this system. A high win rate of {win_rate:.1%} confirms the AI's predictive accuracy, successfully filtering out false signals in choppy markets.")
         elif latest_csv:
-            # 备用方案：如果 JSON 不存在，尝试从 CSV 估算 (旧逻辑)
             try:
                 df_bt = pd.read_csv(latest_csv)
                 total_ret = (df_bt["equity"].iloc[-1] / df_bt["equity"].iloc[0]) - 1

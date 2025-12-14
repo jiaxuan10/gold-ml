@@ -39,7 +39,7 @@ def fetch_latest_window():
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(hours=HIST_WINDOW)
 
-    print(f"📡 Connecting to Yahoo Finance... ({datetime.now().strftime('%H:%M:%S')})")
+    print(f" Connecting to Yahoo Finance... ({datetime.now().strftime('%H:%M:%S')})")
     df = yf.download(
         tickers=list(ASSETS.values()),
         start=start_date,
@@ -51,7 +51,7 @@ def fetch_latest_window():
     )
 
     if df is None or df.empty:
-        print("❌ No data returned.")
+        print(" No data returned.")
         return None
 
     # Fix MultiIndex
@@ -79,49 +79,41 @@ def fetch_latest_window():
             sub = df[sym][["Close"]].reset_index().rename(columns={"Datetime": "Date", "Close": sym})
             merged = pd.merge_asof(merged.sort_values("Date"), sub.sort_values("Date"), on="Date")
 
-    # 1. 先填充 (ffill) 
     merged = merged.ffill().bfill()
 
-    # ✅ 1. 确保时间格式
     merged["Date"] = pd.to_datetime(merged["Date"], utc=True)
 
-    # 🔥🔥🔥【关键修复：强制整点过滤】🔥🔥🔥
-    # 删掉所有 xx:30, xx:15 的非整点数据，只保留 xx:00
-    # 这一行必须加，否则 Yahoo 给的 14:30 数据会让 AI 发疯
+
     merged = merged[merged["Date"].dt.minute == 0].reset_index(drop=True)
 
-    # ✅ 2. 剔除周六 (Closed Market)
     merged = merged[merged["Date"].dt.dayofweek != 5].reset_index(drop=True)
 
-    # ✅ 3. 剔除“僵尸数据” (Flat Line Cleaner)
     if "GOLD_Close" in merged.columns:
         merged = merged[merged["GOLD_Close"].diff().fillna(1.0).abs() > 1e-6].reset_index(drop=True)
 
-    # ✅ 4. 剔除“未完成”的最新 K 线
     if not merged.empty:
         current_utc_hour = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         last_row_time = merged["Date"].iloc[-1]
         
         if last_row_time >= current_utc_hour:
-            print(f"✂️ Dropping unfinished candle: {last_row_time} (Current UTC: {current_utc_hour})")
+            print(f" Dropping unfinished candle: {last_row_time} (Current UTC: {current_utc_hour})")
             merged = merged.iloc[:-1]
 
-    # 2. 计算指标
     merged = add_technical_features(merged)
     
     return merged.tail(200)
 
 if __name__ == "__main__":
-    print(f"🔄 Realtime Fetcher Started. Saving to {OUTPUT_CSV}")
+    print(f" Realtime Fetcher Started. Saving to {OUTPUT_CSV}")
     while True:
         try:
             data = fetch_latest_window()
             if data is not None and not data.empty:
                 data.to_csv(OUTPUT_CSV, index=False)
-                print(f"✅ Data Updated. Last Candle Used: {data['Date'].iloc[-1]}")
+                print(f" Data Updated. Last Candle Used: {data['Date'].iloc[-1]}")
             else:
-                print("⚠️ Fetch failed or empty.")
+                print(" Fetch failed or empty.")
         except Exception as e:
-            print(f"⚠️ Error: {e}")
+            print(f" Error: {e}")
         
         time.sleep(CHECK_INTERVAL)

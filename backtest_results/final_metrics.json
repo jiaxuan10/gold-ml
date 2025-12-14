@@ -1,0 +1,9 @@
+{
+    "total_return": 0.0989619405806903,
+    "sharpe_ratio": 2.827067282660852,
+    "max_drawdown": -0.00873888438207814,
+    "win_rate": 0.8333333333333334,
+    "total_trades": 6,
+    "final_capital": 10989.619405806903,
+    "model_threshold_used": 0.55
+}

@@ -59,7 +59,7 @@ def log_trade(date, side, price, size, pnl=0, reason=""):
     exists = os.path.exists(TRADE_LOG)
     with open(TRADE_LOG, "a") as f:
         if not exists: f.write("Date,Side,Price,Size,PnL,Reason,Balance\n")
-        f.write(f"{date},{side},{price},{size:.4f},{pnl:.2f},{reason},{portfolio['balance']:.2f}\n")
+        f.write(f"{date},{side},{price},{size:.4f},{pnl:.3f},{reason},{portfolio['balance']:.3f}\n")
 
 def get_sentiment_modifier():
     if not os.path.exists(SENTIMENT_FILE): return 0.0, "NoNews"
@@ -68,21 +68,17 @@ def get_sentiment_modifier():
             data = json.load(f)
             score = data.get("sentiment_score", 0.0)
             
-            # 1. 极好新闻 (> 0.2) -> 门槛降低 0.02
             if score > 0.2: 
-                return -0.02, f"BullNews({score:.2f})"
+                return -0.02, f"BullNews({score:.3f})"
             
-            # 2. 稍好新闻 (> 0.05) -> 门槛降低 0.01
             if score > 0.05: 
-                return -0.01, f"GoodNews({score:.2f})"
+                return -0.01, f"GoodNews({score:.3f})"
             
-            # 3. 极差新闻 (< -0.2) -> 门槛升高 0.02
             if score < -0.2: 
-                return 0.02, f"BearNews({score:.2f})"
+                return 0.02, f"BearNews({score:.3f})"
             
-            # 4. 稍差新闻 (< -0.05) -> 门槛升高 0.01
             if score < -0.05: 
-                return 0.01, f"BadNews({score:.2f})"
+                return 0.01, f"BadNews({score:.3f})"
             
             return 0.0, "NeutralNews"
     except: return 0.0, "Error"
@@ -92,20 +88,20 @@ try:
     LATEST_RUN = sorted([d for d in os.listdir(MODELS_DIR) if d.startswith("run_")])[-1]
     pkl_name = f"ensemble_calibrated_{LATEST_RUN.split('_')[1]}_{LATEST_RUN.split('_')[2]}.pkl"
     MODEL_PATH = os.path.join(MODELS_DIR, LATEST_RUN, pkl_name)
-    print(f"📂 Loading Model: {MODEL_PATH}")
+    print(f" Loading Model: {MODEL_PATH}")
     with open(MODEL_PATH, "rb") as f: model_meta = pickle.load(f)
 except Exception as e:
-    print(f"❌ Model Error: {e}")
+    print(f" Model Error: {e}")
     sys.exit(1)
 
 calib_model = model_meta["calibrated_model"]
 feature_cols = model_meta["feature_cols"] 
 # base_threshold = model_meta.get("threshold", 0.5)
 base_threshold = 0.50 # <--- FYP MODE: Forced to 0.50
-print(f"⚠️ FYP MODE: Overriding threshold to {base_threshold} to force trades.")
+print(f" FYP MODE: Overriding threshold to {base_threshold} to force trades.")
 
 portfolio = load_portfolio()
-print(f"🚀 Live Engine Started. Risk: {BASE_RISK_PCT*100}% | Threshold: {base_threshold}")
+print(f" Live Engine Started. Risk: {BASE_RISK_PCT*100}% | Threshold: {base_threshold}")
 
 while True:
     try:
@@ -122,30 +118,23 @@ while True:
         latest_row = df.iloc[-1]
         latest_time = latest_row["Date"]
 
-        # 🔥🔥🔥【新增】过期数据熔断机制 (Stale Data Breaker) 🔥🔥🔥
         try:
-            # 1. 确保 latest_time 是 datetime 对象
             if isinstance(latest_time, str):
                 dt_latest = pd.to_datetime(latest_time, utc=True)
             else:
                 dt_latest = latest_time
 
-            # 2. 获取当前 UTC 时间
             now_utc = datetime.now(timezone.utc)
             
-            # 3. 计算滞后时间 (小时)
             time_lag = (now_utc - dt_latest).total_seconds() / 3600
             
-            # 4. 如果数据滞后超过 2 小时，视为过期数据，直接跳过
-            if time_lag > 2.0:
-                print(f"⚠️ Data Stale! Latest: {dt_latest}, Now: {now_utc.strftime('%H:%M')}. Lag: {time_lag:.1f}h. Skipping...")
+            if time_lag > 72.0:
+                print(f" Data Stale! Latest: {dt_latest}, Now: {now_utc.strftime('%H:%M')}. Lag: {time_lag:.1f}h. Skipping...")
                 time.sleep(10)
                 continue
         except Exception as e:
-            pass # 如果时间检查出错，暂时忽略，以免卡死
-        # 🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+            pass
 
-        # 检查是否已经处理过这根 K 线
         if portfolio.get("last_candle") == str(latest_time):
             time.sleep(10); continue
             
@@ -172,6 +161,7 @@ while True:
 
         # Sentiment Adj
         sent_adj, sent_reason = get_sentiment_modifier()
+        
         final_threshold = max(0.3, min(0.9, base_threshold + sent_adj))
         
         model_signal = 1 if raw_prob > final_threshold else 0
@@ -181,12 +171,14 @@ while True:
         vol_now = float(latest_row.get("Volatility_20", 0.0))
         sma20 = df["SMA_20_Live"].iloc[-1]
         sma60 = df["SMA_60_Live"].iloc[-1]
+
         momentum_ok = sma20 > sma60 if (pd.notna(sma20) and pd.notna(sma60)) else True
         vol_cutoff = df["Volatility_20"].quantile(VOL_THRESHOLD_PCTL)
         vol_ok = vol_now <= (vol_cutoff if pd.notna(vol_cutoff) else 100)
         curr_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
         
-        want_long = (model_signal == 1) and momentum_ok and vol_ok
+        # want_long = (model_signal == 1) and momentum_ok and vol_ok
+        want_long = (model_signal == 1)
         
         # Save Status
         status = {
@@ -227,12 +219,12 @@ while True:
                 portfolio["balance"] += price * pos
                 portfolio["position"] = 0.0
                 log_trade(latest_time, "SELL", price, pos, pnl, reason)
-                print(f"💰 {reason} Hit! PnL: ${pnl:.2f}")
+                print(f" {reason} Hit! PnL: ${pnl:.3f}")
                 action_taken = True
 
             # 3. Check Strategy Exit
             elif not want_long:
-                reason = f"Exit(Prob {raw_prob:.2f} < {final_threshold:.2f})"
+                reason = f"Exit(Prob {raw_prob:.3f} < {final_threshold:.3f})"
                 pnl = (price - portfolio["entry_price"]) * pos
                 portfolio["balance"] += price * pos
                 portfolio["position"] = 0.0
@@ -253,24 +245,24 @@ while True:
                 portfolio["entry_price"] = price
                 portfolio["sl"] = price - stop_dist
                 portfolio["tp"] = price + (atr * ATR_TP_MULT)
-                reason = f"Buy(Prob {raw_prob:.2f} > {final_threshold:.2f}) | {sent_reason}"
+                reason = f"Buy(Prob {raw_prob:.3f} > {final_threshold:.3f}) | {sent_reason}"
                 log_trade(latest_time, "BUY", price, units, 0, reason)
                 print(f"🟢 {reason}")
                 action_taken = True
-
+ 
         if not action_taken:
             status_side = "HOLD" if pos > 0 else "WAIT"
-            reason = f"{sent_reason} | Prob:{raw_prob:.2f} vs Thr:{final_threshold:.2f}"
+            reason = f"{sent_reason} | Prob:{raw_prob:.3f} vs Thr:{final_threshold:.3f}"
             log_trade(latest_time, status_side, price, 0.0, 0.0, reason)
             print(f"⏳ {status_side} | {reason}")
 
         portfolio["equity"] = portfolio["balance"] + (portfolio["position"] * price)
         portfolio["last_candle"] = str(latest_time)
         save_portfolio(portfolio)
-        print(f"📊 Equity: ${portfolio['equity']:.2f}")
+        print(f" Equity: ${portfolio['equity']:.3f}")
 
     except Exception as e:
-        print(f"⚠️ Error: {e}")
+        print(f" Error: {e}")
         time.sleep(5)
     
     time.sleep(5)

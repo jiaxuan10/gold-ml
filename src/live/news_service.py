@@ -4,96 +4,94 @@
 import os
 import time
 import json
-import requests
 import pandas as pd
+import feedparser 
 from datetime import datetime, timedelta, timezone
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 import warnings
 
 warnings.filterwarnings("ignore")
 
-# ====== CONFIG ======
-NEWS_API_KEY = "e450698ba6784d9f983422b99b756214" 
-KEYWORDS = ['"gold price"', '"federal reserve"', '"inflation"', '"usd index"', '"geopolitical"']
-IRRELEVANT_WORDS = ["fashion", "jewelry", "sport", "design", "music", "deal"]
-MODEL_NAME = "yiyanghkust/finbert-tone"
-REFRESH_INTERVAL = 1800  # 30分钟刷新一次
 
-# Paths
+RSS_URLS = [
+    "https://news.google.com/rss/search?q=gold%20price&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=federal%20reserve&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=inflation&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=usd%20index&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=geopolitical&hl=en-US&gl=US&ceid=US:en"
+]
+IRRELEVANT_WORDS = ["fashion", "jewelry", "sport", "design", "music", "deal", "cricket", "football"]
+
+MODEL_NAME = "yiyanghkust/finbert-tone"
+REFRESH_INTERVAL = 1800 
+
+
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_DIR = os.path.join(ROOT, "data", "final")
 SENTIMENT_STATE_FILE = os.path.join(DATA_DIR, "current_sentiment.json")
-NEWS_LIST_FILE = os.path.join(DATA_DIR, "latest_news_headlines.csv") # 🆕 新闻列表文件
+NEWS_LIST_FILE = os.path.join(DATA_DIR, "latest_news_headlines.csv")
 
 def load_finbert():
-    print("🚀 Loading FinBERT model...")
+    print(" Loading FinBERT model...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
     return pipeline("sentiment-analysis", model=model, tokenizer=tokenizer)
 
+def parse_pubdate(date_str):
+    try:
+        dt = datetime.strptime(date_str, "%a, %d %b %Y %H:%M:%S %Z")
+        return dt.replace(tzinfo=timezone.utc)
+    except:
+        return datetime.now(timezone.utc) 
+
 def fetch_and_analyze(nlp):
-    print(f"📡 Fetching news at {datetime.now().strftime('%H:%M')}...")
-    to_date = datetime.now()
-    from_date = to_date - timedelta(days=2) 
+    print(f" Fetching REAL-TIME Google News at {datetime.now().strftime('%H:%M')}...")
     
     articles_data = [] 
     all_scores = []
     
-    for keyword in KEYWORDS:
+    for url in RSS_URLS:
         try:
-            # Fetch
-            url = (f"https://newsapi.org/v2/everything?q={keyword}&language=en&"
-                   f"from={from_date.date()}&sortBy=publishedAt&pageSize=100&apiKey={NEWS_API_KEY}")
-            resp = requests.get(url, timeout=10)
+            feed = feedparser.parse(url)
             
-            # 增加容错：万一 API 返回非 JSON 格式
-            try:
-                data = resp.json()
-            except:
-                print(f"⚠️ API Response Error for {keyword}")
-                continue
+            for entry in feed.entries[:20]: 
+                title = entry.title
+                link = entry.link
+                pub_date_str = entry.published
+                source = entry.source.title if 'source' in entry else "GoogleNews"
                 
-            articles = data.get("articles", [])
-            
-            for art in articles:
-                title = art.get("title", "")
-                if not title: continue
-                
-                source = art.get("source", {}).get("name", "Unknown")
-                url_link = art.get("url", "")
-                date_str = art.get("publishedAt", "")
-                
-                # 1. Filter
                 if any(w in title.lower() for w in IRRELEVANT_WORDS): continue
                 
-                # 2. Deduplicate (关键修复点 🔥)
-                # 使用 d.get("Title") 既能匹配大写 Key，又不会因为找不到 key 而报错
-                # 或者明确使用 d["Title"]
-                if any(d.get('Title') == title for d in articles_data): continue
+                if any(d['Title'] == title for d in articles_data): continue
                 
-                # 3. Analyze
+
                 res = nlp(title[:512])[0]
                 label = res['label']
                 prob = res['score']
                 
-                # Mapping
                 score = prob if label == 'Positive' else -prob if label == 'Negative' else 0
                 
+
+                if entry.published_parsed:
+                    dt = datetime.fromtimestamp(time.mktime(entry.published_parsed), timezone.utc)
+                else:
+                    dt = datetime.now(timezone.utc)
+                
+                date_iso = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
                 all_scores.append(score)
                 articles_data.append({
-                    "Date": date_str,
+                    "Date": date_iso,
                     "Source": source,
-                    "Title": title, # 存的时候是大写 Title
+                    "Title": title,
                     "Label": label,
                     "Score": round(score, 4),
-                    "URL": url_link
+                    "URL": link
                 })
                 
         except Exception as e:
-            # 打印完整的错误堆栈，方便调试
-            print(f"⚠️ Error processing '{keyword}': {e}")
+            print(f" Error processing RSS: {e}")
 
-    # Save List to CSV (Append Mode)
     if articles_data:
         new_df = pd.DataFrame(articles_data)
         
@@ -101,7 +99,6 @@ def fetch_and_analyze(nlp):
             try:
                 old_df = pd.read_csv(NEWS_LIST_FILE)
                 combined_df = pd.concat([new_df, old_df], ignore_index=True)
-                # CSV 读取后列名通常保持原样 (Title)
                 combined_df = combined_df.drop_duplicates(subset=["Title"], keep='first')
             except:
                 combined_df = new_df
@@ -109,30 +106,33 @@ def fetch_and_analyze(nlp):
             combined_df = new_df
             
         combined_df = combined_df.sort_values("Date", ascending=False)
-        combined_df = combined_df.head(100)
+        combined_df = combined_df.head(100) 
         
-        combined_df.to_csv(NEWS_LIST_FILE, index=False)
-        print(f"✅ Updated news list. Total count: {len(combined_df)}")
+        temp_file = NEWS_LIST_FILE + ".tmp"
+        try:
+            combined_df.to_csv(temp_file, index=False)
+            if os.path.exists(NEWS_LIST_FILE):
+                try:
+                    os.replace(temp_file, NEWS_LIST_FILE)
+                except PermissionError:
+                    print(f" File Locked by Excel! Skipping update this time.")
+            else:
+                os.rename(temp_file, NEWS_LIST_FILE)
+            print(f" Updated news list. Total count: {len(combined_df)}")
+        except Exception as e:
+            print(f" Save Failed: {e}")
     else:
-        print("⚠️ No NEW relevant articles found.")
+        print(" No news found (Check internet connection).")
 
-    # Calculate Average
-# 2. Calculate Average (优化版：只看有观点的新闻)
     if all_scores:
-        # 过滤掉 0 分的新闻，只计算有态度的
-        active_scores = [s for s in all_scores if abs(s) > 0.1]
+        active_scores = [s for s in all_scores if abs(s) > 0.2]
         
         if active_scores:
-            # 如果有观点，取平均
             avg_sentiment = sum(active_scores) / len(active_scores)
         else:
-            # 如果全是中性，那就中性
             avg_sentiment = 0.0
-            
-        # 额外加成：如果全是有观点的新闻里，正负抵消了，还是给个 0
     else:
         avg_sentiment = 0.0
-
         
     return avg_sentiment
 
@@ -144,7 +144,6 @@ if __name__ == "__main__":
         try:
             score = fetch_and_analyze(nlp)
             
-            # 保存状态供 inference_service 读取
             state = {
                 "last_updated": str(datetime.now()),
                 "sentiment_score": round(score, 4), 
@@ -154,12 +153,10 @@ if __name__ == "__main__":
             with open(SENTIMENT_STATE_FILE, "w") as f:
                 json.dump(state, f)
                 
-            print(f"📊 Sentiment Updated: {score:.4f} ({state['status']})")
-            
-            # 倒计时显示
-            print(f"💤 Sleeping for 30 mins...")
+            print(f" Sentiment Updated: {score:.4f} ({state['status']})")
+            print(f" Sleeping for 30 mins...")
             time.sleep(REFRESH_INTERVAL)
             
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f" Error: {e}")
             time.sleep(60)
