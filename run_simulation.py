@@ -26,7 +26,7 @@ def run_process(command, title):
 
 try:
     if os.path.exists(SENTIMENT_FILE):
-        print("🧹 Cleaning up old sentiment data...")
+        print(" Cleaning up old sentiment data...")
         os.remove(SENTIMENT_FILE)
 
     # 1. Start News Service (Background)
@@ -43,7 +43,7 @@ try:
             print("\n News Service timed out! Starting Trader anyway...")
             break
             
-    print(f"\n✅ News Ready! Found: {SENTIMENT_FILE}")
+    print(f"\n News Ready! Found: {SENTIMENT_FILE}")
 
     # 2. Start Data Fetcher
     run_process(f"python {FETCHER_SCRIPT}", "Data Fetcher")

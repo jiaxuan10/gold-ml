@@ -23,10 +23,10 @@ SENTIMENT_FILE = os.path.join(DATA_DIR, "current_sentiment.json")
 
 # Strategy Params
 INITIAL_CAPITAL = 10000.0
-BASE_RISK_PCT = 0.02
-ATR_SL_MULT = 1.5
-ATR_TP_MULT = 4.0
-MAX_POS_FRAC = 0.5
+BASE_RISK_PCT = 0.05  
+ATR_SL_MULT = 3.0    
+ATR_TP_MULT = 4.5    
+MAX_POS_FRAC = 0.9   
 VOL_THRESHOLD_PCTL = 0.995
 REGIME_WEIGHTS = {"bull": 1.2, "neutral": 1.0, "bear": 0.9}
 ENABLE_TRAILING = False

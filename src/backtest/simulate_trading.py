@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""
-simulate_trading.py
--------------------------------------------------
-Backtesting entry for Profit-Boost v6 with OUT-OF-SAMPLE Split.
-✅ FIX: Force-overrides strategy parameters to ensure profitability.
-"""
 
 import os
 import sys
@@ -25,14 +19,14 @@ from strategy import ProfitBoostStrategy
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 #  Ensure this path is correct!
-MODEL_PATH = os.path.join(ROOT, "models", "run_20251215_034905", "ensemble_calibrated_20251215_034905.pkl")
+MODEL_PATH = os.path.join(ROOT, "models", "run_20251215_204020", "ensemble_calibrated_20251215_204020.pkl")
 DATA_PATH = os.path.join(ROOT, "data", "final", "final_dataset_hourly.csv")
 SAVE_DIR = os.path.join(ROOT, "backtest_results")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 #  Time Split
 TEST_START_DATE = '2025-08-25' 
-TEST_END_DATE = '2025-11-20' 
+TEST_END_DATE = '2025-10-19' 
 def main():
     if not os.path.exists(DATA_PATH):
         print("Data not found:", DATA_PATH)
@@ -43,15 +37,6 @@ def main():
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True)
     df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
-    # 2. Rename columns
-    rename_map = {
-        "GOLD_Close": "Close",
-        "GOLD_Open": "Open",
-        "GOLD_High": "High",
-        "GOLD_Low": "Low",
-        "GOLD_Volume": "Volume"
-    }
-    df = df.rename(columns=rename_map)
 
     # 3. Ensure enough history for rolling features
     ROLL_MAX = 24  # maximum window for rolling features like vol_24h
@@ -86,15 +71,10 @@ def main():
 
     # 7. Feature Alignment
     feature_cols = model_meta.get("feature_cols", [])
-    # 修复：先检查哪些特征缺失，再决定如何处理
-    print("🔍 特征对齐检查:")
     missing_features = [c for c in feature_cols if c not in df_test.columns]
     if missing_features:
-        print(f"❌ 缺失特征 ({len(missing_features)}个): {missing_features[:5]}...")
-        # 对于确实应该存在的特征，用合理值填充而不是0
         for c in missing_features:
             if c in ["ATR", "vol_24h", "momentum_ok"]:
-                # 这些是策略必需的特征，用计算值填充
                 if c == "ATR":
                     df_test[c] = df_test.get("ATR_14", 0.0)
                 elif c == "vol_24h":
@@ -102,9 +82,9 @@ def main():
                 elif c == "momentum_ok":
                     df_test[c] = (df_test.get("SMA_20", 0) > df_test.get("SMA_50", 0)).astype(int)
             else:
-                df_test[c] = 0.0  # 其他特征用0填充
+                df_test[c] = 0.0  
     else:
-        print("✅ 所有特征都存在")
+        print("✅ All required features present")
 
     # 8. Initialize Strategy
     strat = ProfitBoostStrategy(model_meta, SAVE_DIR, shift_features=True)

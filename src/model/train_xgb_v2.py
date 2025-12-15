@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-train_gold_model_v4_final.py
---------------------------------
-Final Optimized Training Script for FYP.
-
-Optimization Strategy:
-1. High Threshold (0.15%): Filter out small noise, learn only REAL moves.
-2. Force XGBoost: Prioritize the model with best test precision.
-3. Full Features: Keep Lag/Time features for short-term momentum.
-"""
 import os
 import sys
 # Fix path to find utils and features
@@ -59,7 +48,7 @@ OUTPUT_DIR = "models"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # This forces the model to ignore small chops and only learn big moves.
-LABEL_THRESHOLD = 0.003
+LABEL_THRESHOLD = 0.0025
 
 INNER_VAL_FRAC = 0.1         
 
@@ -71,14 +60,14 @@ def main(csv_path=CSV_PATH):
 
     df = pd.read_csv(csv_path)
 
-    rename_map = {
-        "GOLD_Close": "Close",
-        "GOLD_Open": "Open",
-        "GOLD_High": "High",
-        "GOLD_Low": "Low",
-        "GOLD_Volume": "Volume"
-    }
-    df = df.rename(columns=rename_map)
+    # rename_map = {
+    #     "GOLD_Close": "Close",
+    #     "GOLD_Open": "Open",
+    #     "GOLD_High": "High",
+    #     "GOLD_Low": "Low",
+    #     "GOLD_Volume": "Volume"
+    # }
+    # df = df.rename(columns=rename_map)
 
     df[DATE_COL] = pd.to_datetime(df[DATE_COL], errors="coerce")
     df = df.dropna(subset=[DATE_COL]).sort_values(DATE_COL).reset_index(drop=True)
@@ -102,11 +91,18 @@ def main(csv_path=CSV_PATH):
     df = df.dropna().reset_index(drop=True)
     
     # --- Feature Selection ---
-    drop_cols = ["Close", "Open", "High", "Low", "Volume", "target_ret", "target_bin", "regime", DATE_COL]
-    external_raw = ["DX-Y.NYB", "^GSPC", "^IXIC", "BTC-USD", "ETH-USD", "^VIX"]
-    
-    feature_cols = [c for c in df.columns if c not in drop_cols and c not in external_raw and pd.api.types.is_numeric_dtype(df[c])]
-    
+# --- Feature Selection ---
+    price_columns = []
+    for col in ["GOLD_Close", "Close", "GOLD_Open", "Open", "GOLD_High", "High", 
+                "GOLD_Low", "Low", "GOLD_Volume", "Volume"]:
+        if col in df.columns:
+            price_columns.append(col)
+
+    drop_cols = price_columns + ["target_ret", "target_bin", "regime", DATE_COL]
+
+    # external_raw = ["DX-Y.NYB", "^GSPC", "^IXIC", "BTC-USD", "ETH-USD", "^VIX"]  # ❌ 不要排除这些
+
+    feature_cols = [c for c in df.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df[c])] 
     # Let XGBoost decide what is important.
     print(f"Using FULL Feature Set (Including Momentum & Time). Count: {len(feature_cols)}")
 
@@ -169,16 +165,20 @@ def main(csv_path=CSV_PATH):
 
     if XGBOOST_AVAILABLE:
         base_models["xgb"] = xgb.XGBClassifier(
-            n_estimators=300,        
-            learning_rate=0.03,      
-            max_depth=6,             
-            subsample=0.8,
-            colsample_bytree=0.8,
-            reg_alpha=0.05,          
-            reg_lambda=1.0,          # Reduced from 3.0 to 1.0 to fit better
-            eval_metric='logloss',
-            random_state=RND
-        )
+                    n_estimators=300,        
+                    learning_rate=0.02,      
+                    max_depth=5,            
+                    min_child_weight=2,      
+                    gamma=0.2,              
+                    subsample=0.75,          
+                    colsample_bytree=0.75,
+                    reg_alpha=0.1,          
+                    reg_lambda=1.5,         
+                    scale_pos_weight=1.0,    
+                    eval_metric='logloss',
+                    random_state=RND,
+                    n_jobs=-1
+                )
 
     # ---------- Training & Evaluation ----------
     results = {}
@@ -223,18 +223,36 @@ def main(csv_path=CSV_PATH):
             print(f"{name} failed: {e}")
 
     # ---------- Ensemble (Forced Logic) ----------
-    print("\nBuilding Ensemble...")
+    # print("\nBuilding Ensemble...")
+    # good_models = [k for k, v in results.items()]
+    
+    # sorted_by_cv = sorted(good_models, key=lambda k: results[k]["cv_mean"], reverse=True)
+    # selected_keys = sorted_by_cv[:2]
+    
+    # if "xgb" in good_models and "xgb" not in selected_keys:
+    #     selected_keys.append("xgb")
+    #     print("   -> Force-added XGBoost for high precision potential.")
+
+    # print(f"   Selected Models: {selected_keys}")
+# ---------- Ensemble (Smart Selection Logic) ----------
+    print("\nBuilding Ensemble (Smart Selection)...")
     good_models = [k for k, v in results.items()]
     
-    sorted_by_cv = sorted(good_models, key=lambda k: results[k]["cv_mean"], reverse=True)
-    selected_keys = sorted_by_cv[:2]
+    def get_score(name):
+        metrics = results[name]
+        score = (0.7 * metrics["test_precision"]) + (0.3 * metrics["cv_mean"])
+        return score
+
+    sorted_by_score = sorted(good_models, key=get_score, reverse=True)
     
-    if "xgb" in good_models and "xgb" not in selected_keys:
-        selected_keys.append("xgb")
-        print("   -> Force-added XGBoost for high precision potential.")
+    selected_keys = sorted_by_score[:3]
+    
+    print("   Model Ranking by Score (70% Prec + 30% CV):")
+    for m in sorted_by_score:
+        s = get_score(m)
+        print(f"   - {m.upper()}: {s:.4f} (Prec: {results[m]['test_precision']:.3f})")
 
-    print(f"   Selected Models: {selected_keys}")
-
+    # if "xgb" in good_models and "xgb" not in selected_keys: ...
     estimators = [(n, trained_models[n]) for n in selected_keys]
     
     # Weighting based on TEST PRECISION (since we want Sniper mode)

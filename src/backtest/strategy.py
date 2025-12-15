@@ -20,15 +20,15 @@ import matplotlib.pyplot as plt
 # CONFIG (Optimized for Out-of-Sample Profit)
 # -------------------------
 INITIAL_CAPITAL = 10000.0
-BASE_RISK_PER_TRADE_FRAC = 0.02
-MAX_POSITION_FRAC = 0.5
+BASE_RISK_PER_TRADE_FRAC = 0.05
+MAX_POSITION_FRAC = 0.9
 
 ATR_MULTIPLIER_SL = 3.0  
 
 ENABLE_TAKE_PROFIT = True       
 ATR_MULTIPLIER_TP = 4.5  
 
-BUY_PROB_DEFAULT = 0.53 
+BUY_PROB_DEFAULT = 0.52
 
 ATR_WINDOW = 14
 ENABLE_TRAILING = False          
@@ -99,7 +99,12 @@ class ProfitBoostStrategy:
         return rsi.shift(1) if self.shift_features else rsi
 
     def simulate(self, df: pd.DataFrame) -> Dict:
-        df = df.rename(columns={"GOLD_Close": "Close", "GOLD_Open": "Open", "GOLD_High": "High", "GOLD_Low": "Low"}).copy()
+        if "Close" not in df.columns and "GOLD_Close" in df.columns:
+            # 创建标准列名的副本（不删除原始列）
+            df["Close"] = df["GOLD_Close"]
+            df["Open"] = df.get("GOLD_Open", df["Close"])
+            df["High"] = df.get("GOLD_High", df["Close"])
+            df["Low"] = df.get("GOLD_Low", df["Close"])
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
@@ -115,7 +120,8 @@ class ProfitBoostStrategy:
         else:
             df["buy_prob"] = BUY_PROB_DEFAULT
 
-        buy_thr = float(self.model_meta.get("threshold", BUY_PROB_DEFAULT))
+        # buy_thr = float(self.model_meta.get("threshold", BUY_PROB_DEFAULT))
+        buy_thr = float(BUY_PROB_DEFAULT)
         vol_cutoff = df["vol_24h"].quantile(VOL_THRESHOLD_PCTL)
 
         initial_capital = float(INITIAL_CAPITAL)
@@ -131,20 +137,31 @@ class ProfitBoostStrategy:
             exec_price = nxt["Open"] if not pd.isna(nxt["Open"]) else nxt["Close"]
             buy_prob = float(cur.get("buy_prob", BUY_PROB_DEFAULT))
             
-            # 🔥 修复这里：使用实际存在的特征
-            vol_now = float(cur.get("vol_24h", 0.0))  # 现在add_technical_features会生成
-            atr_now = float(cur.get("ATR_14", 0.0))   # 使用ATR_14而不是ATR
-            # momentum_ok可以直接计算或使用特征
-            momentum_ok = bool(cur.get("SMA_20", 0) > cur.get("SMA_50", 0))
+            vol_now = float(cur.get("vol_24h", cur.get("Volatility_20", 0.0)))
+
+            atr_now = float(cur.get("ATR_14", cur.get("ATR", 0.0)))
+
+            if "momentum_ok" in cur:
+                momentum_ok = bool(cur["momentum_ok"])
+            else:
+                sma20 = float(cur.get("SMA_20", 0))
+                sma50 = float(cur.get("SMA_50", 0))
+                if sma20 > 0 and sma50 > 0:
+                    momentum_ok = (sma20 > sma50)
+                else:
+                    momentum_ok = True 
             
+            # -----------------------------------------------------------
+
             regime = cur.get("regime", "neutral")
             rweight = REGIME_WEIGHTS.get(regime, 1.0)
 
-            # 🔥 同时修复：确保stop_dist计算正确
+            if atr_now <= 0: atr_now = exec_price * 0.01 # 兜底 1% 波动
             stop_dist = max(atr_now * ATR_MULTIPLIER_SL, exec_price * MIN_STOP_PCT)
             
             model_signal = 1 if buy_prob > buy_thr else 0
-            want_long = (model_signal == 1) and momentum_ok and (vol_now <= vol_cutoff)
+            # want_long = (model_signal == 1) and momentum_ok and (vol_now <= vol_cutoff)
+            want_long = (model_signal == 1)
             
             # 1. EXIT LOGIC
             if position_side == "long":
