@@ -12,21 +12,21 @@ ROOT_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(ROOT_SRC)
 
 # Import necessary modules
-from features.features_engineering import add_technical_features
+from features.features_engineering import add_technical_features_backtest
 # We import the class but we will monkey-patch its config
 from strategy import ProfitBoostStrategy 
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 #  Ensure this path is correct!
-MODEL_PATH = os.path.join(ROOT, "models", "run_20251215_204020", "ensemble_calibrated_20251215_204020.pkl")
+MODEL_PATH = os.path.join(ROOT, "models", "run_20251218_012053", "ensemble_calibrated_20251218_012053.pkl")
 DATA_PATH = os.path.join(ROOT, "data", "final", "final_dataset_hourly.csv")
 SAVE_DIR = os.path.join(ROOT, "backtest_results")
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 #  Time Split
 TEST_START_DATE = '2025-08-25' 
-TEST_END_DATE = '2025-10-19' 
+TEST_END_DATE = '2025-10-28' 
 def main():
     if not os.path.exists(DATA_PATH):
         print("Data not found:", DATA_PATH)
@@ -45,7 +45,7 @@ def main():
     df_test_full = df.iloc[hist_start_idx:].copy().reset_index(drop=True)
 
     # 4. Feature Engineering
-    df_test_full = add_technical_features(df_test_full)
+    df_test_full = add_technical_features_backtest(df_test_full)
 
     # 5. Slice Out-of-Sample Testing period
     df_test = df_test_full[df_test_full["Date"].between(

@@ -1,7 +1,7 @@
 {
-    "total_return": 0.013606721737232652,
-    "sharpe": 2.9378120215938583,
-    "max_drawdown": -0.012154040591210058,
-    "win_rate": 0.75,
-    "total_trades": 20
+    "total_return": 0.05475800421559307,
+    "sharpe": 3.046007055658484,
+    "max_drawdown": -0.03448898141018664,
+    "win_rate": 0.5798319327731093,
+    "total_trades": 119
 }

@@ -29,7 +29,7 @@ except Exception:
 
 # Import from your project structure
 from utils.market_regime_detector import MarketRegimeDetector
-from features.features_engineering import add_technical_features, prepare_target, detect_market_regime
+from features.features_engineering import add_technical_features, prepare_target, detect_market_regime,add_technical_features_backtest
 
 RND = 42
 np.random.seed(RND)
@@ -48,7 +48,7 @@ OUTPUT_DIR = "models"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # This forces the model to ignore small chops and only learn big moves.
-LABEL_THRESHOLD = 0.0025
+LABEL_THRESHOLD = 0.003
 
 INNER_VAL_FRAC = 0.1         
 
@@ -102,7 +102,19 @@ def main(csv_path=CSV_PATH):
 
     # external_raw = ["DX-Y.NYB", "^GSPC", "^IXIC", "BTC-USD", "ETH-USD", "^VIX"]  # ❌ 不要排除这些
 
-    feature_cols = [c for c in df.columns if c not in drop_cols and pd.api.types.is_numeric_dtype(df[c])] 
+    feature_cols = [
+        "RSI_14", 
+        "MA_diff", 
+        "Gold_DX-Y.NYB_Ratio", 
+        "^VIX", 
+        "Gold_BTC-USD_Ratio", 
+        "ATR_14", 
+        "momentum_ok", 
+        "Lag_Return_1h", 
+        "Hour_Sin", 
+        "Hour_Cos", 
+        "Corr_DX-Y.NYB_24h"
+    ]
     # Let XGBoost decide what is important.
     print(f"Using FULL Feature Set (Including Momentum & Time). Count: {len(feature_cols)}")
 
@@ -139,46 +151,18 @@ def main(csv_path=CSV_PATH):
     X_full_train = X_train_df.values
     X_test  = X_test_df.values
 
-    # ---------- Base Models (Optimized for Precision) ----------
+    # ---------- Base Models ----------
     base_models = {
-        "rf": RandomForestClassifier(
-            n_estimators=200, max_depth=10, min_samples_split=20, 
-            max_features='sqrt', random_state=RND
-        ),
-        "gb": GradientBoostingClassifier(
-            n_estimators=200, learning_rate=0.05, max_depth=4, 
-            subsample=0.8, random_state=RND
-        ),
-        "svc": Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", SVC(C=1.5, kernel="rbf", gamma="scale", probability=True, random_state=RND))
-        ]),
-        "mlp": Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", MLPClassifier(hidden_layer_sizes=(64, 32), alpha=0.01, max_iter=800, early_stopping=True, random_state=RND))
-        ]),
-        "logreg": Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", LogisticRegression(C=0.8, max_iter=2000, solver='lbfgs', random_state=RND))
-        ])
+        "rf": RandomForestClassifier(n_estimators=200, max_depth=10, min_samples_split=20, max_features='sqrt', random_state=RND),
+        "gb": GradientBoostingClassifier(n_estimators=200, learning_rate=0.05, max_depth=4, subsample=0.8, random_state=RND),
+        "svc": Pipeline([("scaler", StandardScaler()),("model", SVC(C=1.5, kernel="rbf", gamma="scale", probability=True, random_state=RND))]),
+        "mlp": Pipeline([("scaler", StandardScaler()),("model", MLPClassifier(hidden_layer_sizes=(64, 32), alpha=0.01, max_iter=800, early_stopping=True, random_state=RND))]),
+        "logreg": Pipeline([("scaler", StandardScaler()),("model", LogisticRegression(C=0.8, max_iter=2000, solver='lbfgs', random_state=RND))])
     }
 
     if XGBOOST_AVAILABLE:
-        base_models["xgb"] = xgb.XGBClassifier(
-                    n_estimators=300,        
-                    learning_rate=0.02,      
-                    max_depth=5,            
-                    min_child_weight=2,      
-                    gamma=0.2,              
-                    subsample=0.75,          
-                    colsample_bytree=0.75,
-                    reg_alpha=0.1,          
-                    reg_lambda=1.5,         
-                    scale_pos_weight=1.0,    
-                    eval_metric='logloss',
-                    random_state=RND,
-                    n_jobs=-1
-                )
+        base_models["xgb"] = xgb.XGBClassifier(n_estimators=300,learning_rate=0.02,max_depth=5,min_child_weight=2,gamma=0.2,subsample=0.75,colsample_bytree=0.75,
+                                               reg_alpha=0.1,reg_lambda=1.5,scale_pos_weight=1.0, eval_metric='logloss',random_state=RND,n_jobs=-1)
 
     # ---------- Training & Evaluation ----------
     results = {}
@@ -242,7 +226,6 @@ def main(csv_path=CSV_PATH):
         metrics = results[name]
         score = (0.7 * metrics["test_precision"]) + (0.3 * metrics["cv_mean"])
         return score
-
     sorted_by_score = sorted(good_models, key=get_score, reverse=True)
     
     selected_keys = sorted_by_score[:3]

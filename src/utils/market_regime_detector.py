@@ -1,8 +1,4 @@
 # src/utils/market_regime_detector_custom.py
-"""
-Enhanced Market Regime Detector (compatible with train_gold_model.py)
-Inspired by ai-gold-scalper's market_regime_detector.py
-"""
 
 import numpy as np
 import pandas as pd
@@ -20,7 +16,7 @@ class MarketRegimeDetector:
 
         # Moving Averages
         df["MA_fast"] = close.rolling(self.ma_fast).mean()
-        df["MA_slow"] = close.srolling(self.ma_slow).mean()
+        df["MA_slow"] = close.rolling(self.ma_slow).mean()
 
         # Momentum: slope of MA_fast
         df["slope"] = df["MA_fast"].diff(self.ma_fast) / df["MA_fast"]

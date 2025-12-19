@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+# src/live/inference_service.py 
+
+import os
+import sys
+import time
+import pickle
+import json
+import pandas as pd
+import numpy as np
+import warnings
+from datetime import datetime, timezone
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
+# ====== CONFIG ======
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+root_dir = os.path.dirname(src_dir)
+
+DATA_DIR = os.path.join(root_dir, "data", "final")
+MODELS_DIR = os.path.join(root_dir, "models")
+LATEST_CSV = os.path.join(DATA_DIR, "latest_hour_features.csv")
+SENTIMENT_FILE = os.path.join(DATA_DIR, "current_sentiment.json")
+
+if src_dir not in sys.path: sys.path.append(src_dir)
+
+# State Files
+PRED_JSON = os.path.join(DATA_DIR, "latest_prediction.json")
+PRED_LOG = os.path.join(DATA_DIR, "prediction_log.csv")
+TRADE_LOG = os.path.join(DATA_DIR, "trade_log.csv")
+PORTFOLIO_STATE = os.path.join(DATA_DIR, "portfolio_state.json")
+
+def load_portfolio():
+    default = {"balance": 10000.0, "position": 0.0, "entry_price": 0.0, "sl": 0.0, "tp": 0.0, "equity": 10000.0, "last_candle": None, "last_price": 0.0}
+    if not os.path.exists(PORTFOLIO_STATE): return default
+    try:
+        with open(PORTFOLIO_STATE, "r") as f: return {**default, **json.load(f)}
+    except: return default
+
+def save_portfolio(p):
+    with open(PORTFOLIO_STATE, "w") as f: json.dump(p, f)
+
+def log_trade(date, side, price, size, pnl=0, reason=""):
+    exists = os.path.exists(TRADE_LOG)
+    with open(TRADE_LOG, "a") as f:
+        if not exists: f.write("Date,Side,Price,Size,PnL,Reason,Balance\n")
+        log_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        f.write(f"{log_time},{side},{price},{size:.4f},{pnl:.2f},{reason},{portfolio['balance']:.2f}\n")
+
+def get_raw_score_safe(model, X):
+    try:
+        if hasattr(model, 'calibrated_classifiers_'):
+            probs = [clf.base_estimator.predict_proba(X)[0, 1] for clf in model.calibrated_classifiers_]
+            return np.mean(probs)
+    except: pass
+    return model.predict_proba(X)[0, 1]
+
+# Load Model
+try:
+    runs = sorted([d for d in os.listdir(MODELS_DIR) if d.startswith("run_")])
+    LATEST_RUN = runs[-1]
+    run_path = os.path.join(MODELS_DIR, LATEST_RUN)
+    pkl_files = [f for f in os.listdir(run_path) if f.endswith('.pkl')]
+    MODEL_PATH = os.path.join(run_path, pkl_files[0])
+    print(f"📦 Loading Model: {MODEL_PATH}")
+    with open(MODEL_PATH, "rb") as f: model_meta = pickle.load(f)
+except: 
+    print("❌ cant find model")
+    sys.exit(1)
+
+calib_model = model_meta["calibrated_model"]
+feature_cols = model_meta["feature_cols"]
+base_threshold = 0.50
+
+portfolio = load_portfolio()
+print(f"🚀 Live Engine Started. Threshold: {base_threshold}")
+
+while True:
+    try:
+        portfolio = load_portfolio()
+        if not os.path.exists(LATEST_CSV): 
+            print("⏳ waiting...")
+            time.sleep(2); continue
+            
+        df = pd.read_csv(LATEST_CSV)
+        if df.empty: time.sleep(2); continue
+
+        if "GOLD_Close" in df.columns: df["Close"] = df["GOLD_Close"]
+        
+        latest_row = df.iloc[-1]
+        latest_time = str(latest_row["Date"])
+        price = float(latest_row.get("Close", 0))
+
+        if portfolio.get("last_price") == price:
+            time.sleep(2); continue
+
+        print(f"\n🔎 Analyzing: {datetime.now().strftime('%H:%M:%S')} (Candle: {latest_time})")
+
+        input_df = pd.DataFrame(0.0, index=[0], columns=feature_cols)
+        non_zero_count = 0
+        for col in feature_cols:
+            if col in latest_row:
+                val = float(latest_row[col])
+                input_df.loc[0, col] = val
+                if abs(val) > 1e-7: non_zero_count += 1
+        
+        print(f"   feature {non_zero_count}/{len(feature_cols)}")
+        if non_zero_count < 5:
+            print("   ⚠️ ")
+
+        X_input = input_df.values.copy()
+
+        raw_prob = get_raw_score_safe(calib_model, X_input)
+        calib_prob = calib_model.predict_proba(X_input)[0, 1]
+        
+        print(f"   AI Score: {calib_prob:.6f} (Raw: {raw_prob:.6f})")
+
+        model_signal = 1 if calib_prob > base_threshold else 0
+        want_long = (model_signal == 1)
+        
+        status = {
+            "Date": latest_time, 
+            "probability": round(calib_prob, 4), 
+            "raw_score": round(raw_prob, 4),
+            "signal": 1 if want_long else 0, 
+            "price": price, 
+            "last_updated": datetime.now().isoformat()
+        }
+        with open(PRED_JSON, "w") as f: json.dump(status, f)
+
+        pos = portfolio["position"]
+        action_taken = False 
+
+        if not action_taken and want_long and pos == 0:
+            portfolio["balance"] -= 1.0 * price #
+            portfolio["position"] = 1.0
+            portfolio["entry_price"] = price
+            log_trade(latest_time, "BUY", price, 1.0, 0, "AI Signal Triggered")
+            print(f"🟢 BUY Order Executed!")
+            action_taken = True
+ 
+        if not action_taken:
+            status_side = "HOLD" if pos > 0 else "WAIT"
+            reason = f"Prob:{calib_prob:.3f} (Raw:{raw_prob:.6f})"
+            log_trade(latest_time, status_side, price, 0.0, 0.0, reason)
+            print(f"⏳ {status_side} | {reason}")
+
+        portfolio["equity"] = portfolio["balance"] + (portfolio["position"] * price)
+        portfolio["last_candle"] = latest_time
+        portfolio["last_price"] = price 
+        save_portfolio(portfolio)
+
+    except Exception as e:
+        print(f"⚠️ Error: {e}")
+    
+    time.sleep(5)

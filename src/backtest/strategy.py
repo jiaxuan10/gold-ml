@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-strategy_v6_6_stable.py
------------------------
-Profit-Boost v6.6 (Stable) - STRICT SYNC with Live Engine
-
-Changes:
-- REMOVED 'vol_scale' logic (Position sizing now matches inference_service.py exactly).
-- Kept Zero Fees (Commission/Slippage = 0.0).
-"""
 import os
 import pickle
 from datetime import datetime
@@ -16,9 +7,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# -------------------------
-# CONFIG (Optimized for Out-of-Sample Profit)
-# -------------------------
+
 INITIAL_CAPITAL = 10000.0
 BASE_RISK_PER_TRADE_FRAC = 0.05
 MAX_POSITION_FRAC = 0.9
@@ -45,7 +34,6 @@ SPREAD_PCT = 0.0
 REGIME_WEIGHTS = {"bull": 1.2, "neutral": 1.0, "bear": 0.9}
 ENABLE_SHORTS = False
 
-# -------------------------
 class ProfitBoostStrategy:
     def __init__(self, model_meta: Dict, save_dir: str, shift_features: bool = True):
         self.model_meta = model_meta
@@ -100,7 +88,6 @@ class ProfitBoostStrategy:
 
     def simulate(self, df: pd.DataFrame) -> Dict:
         if "Close" not in df.columns and "GOLD_Close" in df.columns:
-            # 创建标准列名的副本（不删除原始列）
             df["Close"] = df["GOLD_Close"]
             df["Open"] = df.get("GOLD_Open", df["Close"])
             df["High"] = df.get("GOLD_High", df["Close"])
@@ -120,7 +107,6 @@ class ProfitBoostStrategy:
         else:
             df["buy_prob"] = BUY_PROB_DEFAULT
 
-        # buy_thr = float(self.model_meta.get("threshold", BUY_PROB_DEFAULT))
         buy_thr = float(BUY_PROB_DEFAULT)
         vol_cutoff = df["vol_24h"].quantile(VOL_THRESHOLD_PCTL)
 
@@ -156,7 +142,7 @@ class ProfitBoostStrategy:
             regime = cur.get("regime", "neutral")
             rweight = REGIME_WEIGHTS.get(regime, 1.0)
 
-            if atr_now <= 0: atr_now = exec_price * 0.01 # 兜底 1% 波动
+            if atr_now <= 0: atr_now = exec_price * 0.01 
             stop_dist = max(atr_now * ATR_MULTIPLIER_SL, exec_price * MIN_STOP_PCT)
             
             model_signal = 1 if buy_prob > buy_thr else 0
@@ -206,7 +192,6 @@ class ProfitBoostStrategy:
             # 2. ENTRY LOGIC
             if position_side is None:
                 if want_long:
-                    # 🔥🔥🔥 Sizing (Synced with Live Engine) 🔥🔥🔥
                     # Removed 'vol_scale' to match inference_service.py
                     adaptive_risk_amt = initial_capital * BASE_RISK_PER_TRADE_FRAC * rweight
                     desired_units = adaptive_risk_amt / (stop_dist + 1e-12)
@@ -273,7 +258,7 @@ class ProfitBoostStrategy:
     def _plot_equity(dates, equity, outpath):
         plt.figure(figsize=(12, 5))
         plt.plot(dates, equity, label="Equity")
-        plt.title("ProfitBoost v6.6 Equity (Zero Fee)")
+        plt.title("Backtest Equity (Zero Fee)")
         plt.grid(alpha=0.3)
         plt.savefig(outpath)
         plt.close()

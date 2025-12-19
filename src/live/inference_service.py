@@ -138,7 +138,7 @@ while True:
         if portfolio.get("last_candle") == str(latest_time):
             time.sleep(10); continue
             
-        print(f"\n🔎 Analyzing: {latest_time}")
+        print(f"\n Analyzing: {latest_time}")
         price = float(latest_row.get("Close", 0))
         if price <= 0: continue
 
@@ -168,12 +168,12 @@ while True:
 
         # Strategy Filters
         atr = float(latest_row.get("ATR_14", 2.0))
-        vol_now = float(latest_row.get("Volatility_20", 0.0))
+        vol_now = float(latest_row.get("vol_24h", 0.0))
         sma20 = df["SMA_20_Live"].iloc[-1]
         sma60 = df["SMA_60_Live"].iloc[-1]
 
         momentum_ok = sma20 > sma60 if (pd.notna(sma20) and pd.notna(sma60)) else True
-        vol_cutoff = df["Volatility_20"].quantile(VOL_THRESHOLD_PCTL)
+        vol_cutoff = df["vol_24h"].quantile(VOL_THRESHOLD_PCTL)
         vol_ok = vol_now <= (vol_cutoff if pd.notna(vol_cutoff) else 100)
         curr_regime = regime_df["regime"].iloc[-1] if "regime" in regime_df.columns else "neutral"
         
