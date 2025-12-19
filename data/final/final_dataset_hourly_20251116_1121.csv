@@ -1,0 +1,1 @@
+Date,GOLD_Close,GOLD_Open,GOLD_High,GOLD_Low,GOLD_Volume,BTC-USD,DX-Y.NYB,ETH-USD,^GSPC,^IXIC,^VIX,Return,LogReturn,SMA_20,SMA_50,EMA_12,EMA_26,MACD,Signal_Line,RSI_14,ATR_14,Volatility_20,Momentum_10,Gold_DX-Y.NYB_Ratio,Corr_DX-Y.NYB_24h,Gold_^GSPC_Ratio,Corr_^GSPC_24h,Gold_BTC-USD_Ratio,Corr_BTC-USD_24h,Lag_Return_1h,Lag_Return_6h,MA_diff,Rolling_Zscore_24h

@@ -1,0 +1,95 @@
+{
+  "metadata": {
+    "timestamp": "20251218_012053",
+    "target_horizon": 4,
+    "best_threshold": 0.5700000000000001,
+    "features_count": 11
+  },
+  "ensemble_performance": {
+    "accuracy": 0.552,
+    "precision": 0.5531914893617021,
+    "recall": 0.6141732283464567,
+    "f1_score": 0.582089552238806,
+    "selected_models": [
+      "xgb",
+      "logreg",
+      "gb"
+    ],
+    "voting_weights": [
+      0.38181444147294796,
+      0.3126928615511212,
+      0.3054926969759309
+    ]
+  },
+  "base_models_performance": {
+    "rf": {
+      "cv_mean": 0.48167330677290837,
+      "cv_std": 0.03676148963959289,
+      "test_acc": 0.528,
+      "test_f1": 0.4537037037037037,
+      "test_precision": 0.550561797752809,
+      "test_recall": 0.3858267716535433,
+      "supports_proba": true
+    },
+    "gb": {
+      "cv_mean": 0.4896414342629482,
+      "cv_std": 0.03430461656036535,
+      "test_acc": 0.548,
+      "test_f1": 0.5271966527196653,
+      "test_precision": 0.5625,
+      "test_recall": 0.49606299212598426,
+      "supports_proba": true
+    },
+    "svc": {
+      "cv_mean": 0.50199203187251,
+      "cv_std": 0.04443615456127069,
+      "test_acc": 0.496,
+      "test_f1": 0.4,
+      "test_precision": 0.5060240963855421,
+      "test_recall": 0.33070866141732286,
+      "supports_proba": true
+    },
+    "mlp": {
+      "cv_mean": 0.49482071713147413,
+      "cv_std": 0.023857856448732853,
+      "test_acc": 0.528,
+      "test_f1": 0.512396694214876,
+      "test_precision": 0.5391304347826087,
+      "test_recall": 0.4881889763779528,
+      "supports_proba": true
+    },
+    "logreg": {
+      "cv_mean": 0.4944223107569721,
+      "cv_std": 0.0481132402851013,
+      "test_acc": 0.552,
+      "test_f1": 0.504424778761062,
+      "test_precision": 0.5757575757575758,
+      "test_recall": 0.44881889763779526,
+      "supports_proba": true
+    },
+    "xgb": {
+      "cv_mean": 0.4940239043824701,
+      "cv_std": 0.04734167578490184,
+      "test_acc": 0.56,
+      "test_f1": 0.5132743362831859,
+      "test_precision": 0.5858585858585859,
+      "test_recall": 0.4566929133858268,
+      "supports_proba": true
+    }
+  },
+  "feature_importances": {
+    "xgb": {
+      "RSI_14": 0.09688212722539902,
+      "MA_diff": 0.10129082202911377,
+      "Gold_DX-Y.NYB_Ratio": 0.11417113989591599,
+      "^VIX": 0.1026989221572876,
+      "Gold_BTC-USD_Ratio": 0.10653828084468842,
+      "ATR_14": 0.09729543328285217,
+      "momentum_ok": 0.0626969039440155,
+      "Lag_Return_1h": 0.06701187044382095,
+      "Hour_Sin": 0.0825573205947876,
+      "Hour_Cos": 0.070909284055233,
+      "Corr_DX-Y.NYB_24h": 0.09794788062572479
+    }
+  }
+}
